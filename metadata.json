@@ -1,0 +1,6 @@
+{
+  "name": "Katuugo Battery Plant Digital Twin",
+  "description": "Digital Twin & Operational Simulator for the 10GWh Kiira Battery Manufacturing Plant in Katuugo Nakasongola, Uganda. Features interactive 2D/3D plant layout visualization, shift discrete-event simulation (1,183 packs/day target), warehouse & material flow optimization, and Gemini AI strategy insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
