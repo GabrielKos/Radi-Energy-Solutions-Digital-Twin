@@ -18,6 +18,8 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   ShieldCheck,
   Zap,
   CheckCircle2,
@@ -28,7 +30,8 @@ import {
   Building2,
   Lock,
   Unlock,
-  Move
+  Move,
+  Info
 } from 'lucide-react';
 
 interface PlantLayout2DProps {
@@ -104,18 +107,25 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Controller Sidebar Drawer State
-  const [isControlPanelOpen, setIsControlPanelOpen] = useState<boolean>(true);
+  // Controller Sidebar Drawer State (default open on desktop, closed on mobile)
+  const [isControlPanelOpen, setIsControlPanelOpen] = useState<boolean>(() => {
+    return typeof window !== 'undefined' ? window.innerWidth >= 1024 : false;
+  });
   const [activeControlTab, setActiveControlTab] = useState<'capacity' | 'logistics' | 'cycles' | 'engine'>('capacity');
 
+  // Mobile Top HUD Expansion State
+  const [isHudExpanded, setIsHudExpanded] = useState<boolean>(() => {
+    return typeof window !== 'undefined' ? window.innerWidth >= 768 : false;
+  });
+
   // Selected Node / Zone Inspector
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>('B01');
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // View Camera State (Pan & Zoom) - Centered Default around (1780, 2625)
   const [camera, setCamera] = useState<{ x: number; y: number; scale: number }>(() => {
     const w = typeof window !== 'undefined' ? window.innerWidth : 1400;
     const h = typeof window !== 'undefined' ? window.innerHeight - 140 : 800;
-    const scale = Math.min(Math.max(Math.min((w - 80) / 3400, (h - 80) / 1350), 0.22), 0.52);
+    const scale = Math.min(Math.max(Math.min((w - 40) / 3400, (h - 40) / 1350), 0.18), 0.52);
     return {
       x: Math.round(w / 2 - 1780 * scale),
       y: Math.round(h / 2 - 2625 * scale),
@@ -125,6 +135,10 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const hasInitializedCameraRef = useRef<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  // Touch Screen Gestures (Pan, Pinch to Zoom, Tap Station)
+  const touchStartRef = useRef<{ x: number; y: number; dist?: number }>({ x: 0, y: 0 });
+  const touchStartTimeRef = useRef<number>(0);
 
   // Station Re-arrangement Dragging & Lock State
   const [isLayoutLocked, setIsLayoutLocked] = useState<boolean>(true); // Default LOCKED to prevent accidental moves
