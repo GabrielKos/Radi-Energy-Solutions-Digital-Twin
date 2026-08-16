@@ -19,6 +19,9 @@ export const ThroughputDashboard: React.FC<ThroughputDashboardProps> = ({
   theme = 'light',
 }) => {
   const isDark = theme === 'dark';
+  const bessTarget = 12;
+  const bessActual = Math.min(bessTarget, Math.floor((simState.goodPacks / Math.max(1, simState.targetPacks)) * bessTarget));
+
   // Generate hourly data for 10-hour shift
   const hourlyTarget = 118.3; // 1,183 packs / 10 hours
   const hourlyData = Array.from({ length: 10 }, (_, i) => {
@@ -27,7 +30,12 @@ export const ThroughputDashboard: React.FC<ThroughputDashboardProps> = ({
     const isCompleted = simState.shiftTimeSeconds >= hour * 3600;
     const isCurrent = !isCompleted && simState.shiftTimeSeconds > i * 3600;
 
-    // Simulate hourly variance based on line yield and speed
+    // Hourly target
+    const targetPacksHr = Math.round(hourlyTarget);
+    const bessHourlyTarget = Math.round((hour / 10) * bessTarget);
+    const bessHourlyPrev = Math.round(((hour - 1) / 10) * bessTarget);
+    const targetBessHr = bessHourlyTarget - bessHourlyPrev;
+
     const basePacks = Math.round(hourlyTarget * (0.95 + Math.sin(i * 0.8) * 0.05) * (simState.currentYieldPct / 0.97));
     const actualPacks = isCompleted
       ? basePacks
@@ -42,19 +50,99 @@ export const ThroughputDashboard: React.FC<ThroughputDashboardProps> = ({
       ? simState.goodPacks
       : 0;
 
+    const actualBess = Math.min(bessTarget, Math.floor((cumulativeActual / Math.max(1, simState.targetPacks)) * bessTarget));
+
     return {
       hour: `Hr ${hour} (0${5 + hour}:00)`,
-      target: Math.round(hourlyTarget),
+      target: targetPacksHr,
       evPacks: actualPacks,
-      bessUnits: Math.round(actualPacks * 0.08), // ~8% cabinet ratio
+      bessUnits: actualBess,
       cumulativeTarget,
       cumulativeActual,
     };
   });
 
+  // Comprehensive Engineering Lead Time & Cycle Time Breakdown Model
+  const zoneLeadTimeModel = [
+    {
+      code: 'Z1',
+      name: 'Cell Receiving & Kitting',
+      stationCycleSumSec: 290,
+      machines: 24,
+      effectiveCadenceSec: 24.2,
+      dwellType: 'Serial handling & barcode registration',
+      bottleneckRisk: 'Low (Pooled AGVs)',
+    },
+    {
+      code: 'Z2',
+      name: 'Cell Grading & Cleaning',
+      stationCycleSumSec: 781,
+      machines: 31,
+      effectiveCadenceSec: 25.2,
+      dwellType: 'OCV (265s), Hi-Pot (180s), Plasma (240s)',
+      bottleneckRisk: 'Balanced (10 parallel sorters)',
+    },
+    {
+      code: 'Z3',
+      name: 'Stacking & 30kN Pressing',
+      stationCycleSumSec: 518,
+      machines: 22,
+      effectiveCadenceSec: 23.5,
+      dwellType: 'Robot tape (105s), Stack (90s), Aerogel (216s)',
+      bottleneckRisk: 'Normal (4 stacking heads)',
+    },
+    {
+      code: 'Z4',
+      name: 'Laser Weld & Cleanroom',
+      stationCycleSumSec: 146,
+      machines: 7,
+      effectiveCadenceSec: 20.8,
+      dwellType: 'Laser Clean (96s), 3kW Weld (38s), CCD (12s)',
+      bottleneckRisk: 'High-Precision (Fast takt)',
+    },
+    {
+      code: 'Z5',
+      name: 'Pack Marriage & Curing',
+      stationCycleSumSec: 4314,
+      machines: 35,
+      effectiveCadenceSec: 26.1,
+      dwellType: 'Robot M01 (300s), 60-min Batch Cure Tunnel',
+      bottleneckRisk: 'Managed via 3 Curing Tunnels (50p/ea)',
+    },
+    {
+      code: 'Z6',
+      name: 'HV Harnessing & BMS',
+      stationCycleSumSec: 2136,
+      machines: 83,
+      effectiveCadenceSec: 25.7,
+      dwellType: 'HV Wiring (1,125s), BMS Mount & Calib (675s)',
+      bottleneckRisk: 'Balanced via 43 Parallel Benches',
+    },
+    {
+      code: 'Z7',
+      name: 'End-of-Line Validation',
+      stationCycleSumSec: 1970,
+      machines: 78,
+      effectiveCadenceSec: 25.3,
+      dwellType: 'IP67 Decay (300s), 5-hr Ageing Cycler (1,217s)',
+      bottleneckRisk: 'Balanced via 46 Ageing Cyclers',
+    },
+    {
+      code: 'Z8',
+      name: 'Passport & Release',
+      stationCycleSumSec: 72,
+      machines: 5,
+      effectiveCadenceSec: 24.0,
+      dwellType: 'Digital Passport & Pack Crating',
+      bottleneckRisk: 'Automated (Direct to WH-2)',
+    },
+  ];
+
+  const totalCumulativeLeadTimeSec = zoneLeadTimeModel.reduce((sum, z) => sum + z.stationCycleSumSec, 0); // 10,227 sec (~2.84 hrs)
+  const totalCumulativeLeadTimeHours = (totalCumulativeLeadTimeSec / 3600).toFixed(2);
+
   // Calculate zone cycle times vs target takt (26.57s)
   const zoneTaktData = zones.map(z => {
-    // Average cycle time across machines in zone divided by machine count
     const avgCycle = z.machines.reduce((acc, m) => acc + (m.cycleTimeSec / m.machinesCount), 0) / z.machines.length;
     const isBottleneck = avgCycle > 26.57 || z.machines.some(m => m.status === 'bottleneck');
     return {
@@ -74,17 +162,19 @@ export const ThroughputDashboard: React.FC<ThroughputDashboardProps> = ({
       {/* Top Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {/* Metric 1: Daily Target & Progress */}
-        <div className="bg-[#111318] border border-[#2D3139] p-4 rounded-lg flex flex-col justify-between">
+        <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+          isDark ? 'bg-[#111318] border-[#2D3139]' : 'bg-white border-slate-200 shadow-sm'
+        }`}>
           <div className="flex items-center justify-between text-xs text-gray-400">
             <span className="uppercase font-bold tracking-wider">Shift EV Pack Target</span>
-            <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[10px] font-mono">10 Hours</span>
+            <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded text-[10px] font-mono font-bold">10 Hours</span>
           </div>
           <div className="my-2">
-            <div className="text-3xl font-light text-white font-mono flex items-baseline gap-2">
+            <div className={`text-3xl font-light font-mono flex items-baseline gap-2 ${isDark ? 'text-white' : 'text-slate-900'}`}>
               {simState.goodPacks.toLocaleString()}{' '}
               <span className="text-sm text-gray-500 font-sans">/ 1,183 Packs</span>
             </div>
-            <div className="w-full bg-[#1A1D23] h-2 rounded-full mt-2 overflow-hidden">
+            <div className="w-full bg-slate-100 dark:bg-[#1A1D23] h-2 rounded-full mt-2 overflow-hidden">
               <div
                 className="bg-blue-500 h-full rounded-full transition-all duration-300"
                 style={{ width: `${Math.min(100, (simState.goodPacks / 1183) * 100)}%` }}
@@ -92,80 +182,149 @@ export const ThroughputDashboard: React.FC<ThroughputDashboardProps> = ({
             </div>
           </div>
           <div className="flex justify-between text-[11px] text-gray-400 font-mono">
-            <span>Pacing: {((simState.goodPacks / Math.max(1, (simState.shiftTimeSeconds / 3600) * 118.3)) * 100).toFixed(1)}% of plan</span>
-            <span className="text-green-400">Yield: {(simState.currentYieldPct * 100).toFixed(1)}%</span>
+            <span>Pacing: {((simState.goodPacks / Math.max(1, (simState.shiftTimeSeconds / 3600) * 118.3)) * 100).toFixed(1)}%</span>
+            <span className="text-emerald-500 font-semibold">FPY Yield: {(simState.currentYieldPct * 100).toFixed(1)}%</span>
           </div>
         </div>
 
-        {/* Metric 2: BESS Cabinets Output */}
-        <div className="bg-[#111318] border border-[#2D3139] p-4 rounded-lg flex flex-col justify-between">
+        {/* Metric 2: BESS Storage Cabinets Output (Proper Proportional Fraction) */}
+        <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+          isDark ? 'bg-[#111318] border-[#2D3139]' : 'bg-white border-slate-200 shadow-sm'
+        }`}>
           <div className="flex items-center justify-between text-xs text-gray-400">
             <span className="uppercase font-bold tracking-wider">BESS Storage Cabinets</span>
-            <span className="px-2 py-0.5 bg-amber-500/20 text-amber-400 rounded text-[10px] font-mono">22 Stations</span>
+            <span className="px-2 py-0.5 bg-amber-500/20 text-amber-500 rounded text-[10px] font-mono font-bold">Fed from M01</span>
           </div>
           <div className="my-2">
-            <div className="text-3xl font-light text-amber-400 font-mono flex items-baseline gap-2">
-              {Math.round(simState.goodPacks * 0.08)}{' '}
+            <div className="text-3xl font-light text-amber-500 font-mono flex items-baseline gap-2">
+              {bessActual}{' '}
               <span className="text-sm text-gray-500 font-sans">/ 12 Cabinets</span>
             </div>
-            <div className="w-full bg-[#1A1D23] h-2 rounded-full mt-2 overflow-hidden">
+            <div className="w-full bg-slate-100 dark:bg-[#1A1D23] h-2 rounded-full mt-2 overflow-hidden">
               <div
                 className="bg-amber-500 h-full rounded-full transition-all duration-300"
-                style={{ width: `${Math.min(100, ((simState.goodPacks * 0.08) / 12) * 100)}%` }}
+                style={{ width: `${Math.min(100, (bessActual / 12) * 100)}%` }}
               />
             </div>
           </div>
           <div className="flex justify-between text-[11px] text-gray-400 font-mono">
-            <span>Integration Line: Active</span>
-            <span className="text-amber-400">Cabinet Takt: 300s</span>
+            <span>Buffer Bank: &ge;20 Packs</span>
+            <span className="text-amber-500 font-semibold">{((bessActual / 12) * 100).toFixed(1)}% Shift Plan</span>
           </div>
         </div>
 
-        {/* Metric 3: Line Takt Time Efficiency */}
-        <div className="bg-[#111318] border border-[#2D3139] p-4 rounded-lg flex flex-col justify-between">
+        {/* Metric 3: Line Output Cadence / Takt Time */}
+        <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+          isDark ? 'bg-[#111318] border-[#2D3139]' : 'bg-white border-slate-200 shadow-sm'
+        }`}>
           <div className="flex items-center justify-between text-xs text-gray-400">
-            <span className="uppercase font-bold tracking-wider">Line Takt Time</span>
-            <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded text-[10px] font-mono">Target 26.57s</span>
+            <span className="uppercase font-bold tracking-wider">Line Exit Cadence</span>
+            <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-500 rounded text-[10px] font-mono font-bold">Takt 26.57s</span>
           </div>
           <div className="my-2">
-            <div className="text-3xl font-light text-emerald-400 font-mono flex items-baseline gap-2">
+            <div className="text-3xl font-light text-emerald-500 font-mono flex items-baseline gap-2">
               {simState.currentTaktSec.toFixed(2)}{' '}
-              <span className="text-sm text-gray-500 font-sans">sec / pack</span>
+              <span className="text-sm text-gray-500 font-sans">sec / exit</span>
             </div>
             <div className="text-xs text-gray-400 mt-1">
-              OEE: <span className="text-white font-bold font-mono">{(simState.currentOeePct * 100).toFixed(1)}%</span> (Planned 90.0%)
+              OEE: <span className={`font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>{(simState.currentOeePct * 100).toFixed(1)}%</span> (Target 90.0%)
             </div>
           </div>
           <div className="flex justify-between text-[11px] font-mono text-gray-400">
-            <span>First Pass Yield: 97.0%</span>
-            <span className="text-green-400">285 Machines</span>
+            <span>Pipelined WIP: ~120 Packs</span>
+            <span className="text-emerald-500">285 Parallel Units</span>
           </div>
         </div>
 
         {/* Metric 4: Quality & Scrap Stats */}
-        <div className="bg-[#111318] border border-[#2D3139] p-4 rounded-lg flex flex-col justify-between">
+        <div className={`p-4 rounded-xl border flex flex-col justify-between transition-all ${
+          isDark ? 'bg-[#111318] border-[#2D3139]' : 'bg-white border-slate-200 shadow-sm'
+        }`}>
           <div className="flex items-center justify-between text-xs text-gray-400">
             <span className="uppercase font-bold tracking-wider">Quality & Rework</span>
-            <span className="px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded text-[10px] font-mono">ISO 2859-1</span>
+            <span className="px-2 py-0.5 bg-purple-500/20 text-purple-400 rounded text-[10px] font-mono font-bold">ISO 2859-1</span>
           </div>
           <div className="my-2 flex items-center justify-between">
             <div>
               <div className="text-xs text-gray-400">Reworked</div>
-              <div className="text-xl font-mono text-amber-400">{simState.reworkedPacks}</div>
+              <div className="text-xl font-mono text-amber-500 font-semibold">{simState.reworkedPacks}</div>
             </div>
             <div>
               <div className="text-xs text-gray-400">Scrapped</div>
-              <div className="text-xl font-mono text-red-400">{simState.scrappedPacks}</div>
+              <div className="text-xl font-mono text-red-500 font-semibold">{simState.scrappedPacks}</div>
             </div>
             <div>
               <div className="text-xs text-gray-400">Passed EOL</div>
-              <div className="text-xl font-mono text-green-400">{simState.goodPacks}</div>
+              <div className="text-xl font-mono text-emerald-500 font-semibold">{simState.goodPacks}</div>
             </div>
           </div>
           <div className="flex justify-between text-[11px] font-mono text-gray-400">
-            <span>Batch Ageing Sample: 6.76%</span>
-            <span className="text-blue-400">S-2 Vibration: 0.42%</span>
+            <span>Ageing Sample: 6.76%</span>
+            <span className="text-blue-500">Vibration: 0.42%</span>
           </div>
+        </div>
+      </div>
+
+      {/* Physics Engineering Model Callout: Cadence Takt vs Total Manufacturing Lead Time */}
+      <div className={`p-5 rounded-xl border transition-all ${
+        isDark ? 'bg-[#141822] border-blue-900/40' : 'bg-blue-50/80 border-blue-200 shadow-sm'
+      }`}>
+        <div className="flex items-start gap-3">
+          <Activity className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className={`text-sm font-bold uppercase tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                Gigafactory Physics & Cycle Time Engineering Model (10 GWh Facility)
+              </h3>
+              <div className="flex items-center gap-2 font-mono text-xs">
+                <span className="px-2 py-0.5 bg-blue-500/20 text-blue-400 rounded font-bold">
+                  Total Lead Time: {totalCumulativeLeadTimeHours} Hours ({totalCumulativeLeadTimeSec.toLocaleString()}s)
+                </span>
+                <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-400 rounded font-bold">
+                  Line Exit Cadence: 26.57s / Pack
+                </span>
+              </div>
+            </div>
+            <p className={`text-xs mt-1.5 leading-relaxed ${isDark ? 'text-gray-300' : 'text-slate-600'}`}>
+              <strong className="text-blue-400">Physical Clarification:</strong> A single battery pack is <em>not</em> manufactured in 26.57 seconds. 
+              The physical journey of a single cell from Inbound Unboxing (WH-1), OCV Grading (265s), Stacking (90s), Laser Welding (38s), 
+              Pack Marriage M01 (300s), Structural Curing Tunnel (3,600s / 60 min), HV Harnessing (1,125s), and EOL Testing (1,217s) requires 
+              <strong> {totalCumulativeLeadTimeHours} hours ({totalCumulativeLeadTimeSec.toLocaleString()} seconds)</strong> of sequential manufacturing lead time.
+              Because the plant operates with <strong>285 parallelized machines</strong> across pipelined concurrent stations with continuous WIP buffer banks, 
+              <strong> a completed pack rolls off the line every 26.57 seconds</strong>, achieving exactly 1,183 packs per 10-hour shift.
+            </p>
+          </div>
+        </div>
+
+        {/* Lead Time Breakdown per Zone Table / Flow Cards */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5 mt-4">
+          {zoneLeadTimeModel.map(z => (
+            <div
+              key={z.code}
+              className={`p-2.5 rounded-lg border text-xs flex flex-col justify-between ${
+                isDark ? 'bg-[#111318] border-[#2D3139]' : 'bg-white border-slate-200'
+              }`}
+            >
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="font-bold font-mono text-blue-500">{z.code}</span>
+                  <span className="text-[10px] text-gray-400 font-mono">{z.machines}u</span>
+                </div>
+                <div className={`font-semibold text-[11px] truncate mt-0.5 ${isDark ? 'text-gray-200' : 'text-slate-800'}`} title={z.name}>
+                  {z.name}
+                </div>
+                <div className="text-[10px] text-gray-400 mt-1 line-clamp-2" title={z.dwellType}>
+                  {z.dwellType}
+                </div>
+              </div>
+              <div className="mt-2 pt-1.5 border-t border-slate-200 dark:border-[#2D3139]">
+                <div className="text-[10px] text-gray-400">Process Time:</div>
+                <div className="font-mono font-bold text-amber-500">{z.stationCycleSumSec}s</div>
+                <div className="text-[10px] text-gray-400 mt-0.5">Cadence:</div>
+                <div className="font-mono font-bold text-emerald-500">{z.effectiveCadenceSec}s</div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 

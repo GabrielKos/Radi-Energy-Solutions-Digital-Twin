@@ -33,6 +33,7 @@ import {
   Move,
   Info
 } from 'lucide-react';
+import plantOpsAerialImg from '../assets/images/plant_ops_aerial_layout_1786912839030.jpg';
 
 interface PlantLayout2DProps {
   zones: ProcessZone[];
@@ -373,14 +374,16 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     addNode('W04_Out', 'WH-2 Outbound Dispatch Dock', 'IO', qgX - 360, lowerY, 1000, 1, 'z8', false, 'Packs');
 
     // --- ZONE 7: BESS UTILITY INTEGRATION LINE (Z_BESS) ---
+    // Physically fed directly from Pack Marriage Robot M01 via dedicated 20-Pack Buffer Bank
     const bessY = lowerY + 340;
-    addNode('BESS_Stack', 'BESS Module Stacking & Rigging', 'M', 2860, bessY, 2, 45, 'z_bess', false, 'Modules');
-    addNode('BESS_Plate', 'Cold Plate Cooling Integration', 'M', 2660, bessY, 2, 35, 'z_bess', false, 'Racks');
-    addNode('BESS_Weld', '1500V DC Busbar Welder', 'M', 2460, bessY, 2, 40, 'z_bess', false, 'Racks');
-    addNode('BESS_BMS', 'HV String BMS Controller Cell', 'M', 2260, bessY, 2, 30, 'z_bess', false, 'Racks');
-    addNode('BESS_Test', '1500V Megawatt Hipot Cycler', 'M', 2060, bessY, 2, 120, 'z_bess', false, 'Racks');
-    addNode('BESS_Gantry', 'Twin 30T Gantry Crane Bay', 'M', 1860, bessY, 2, 60, 'z_bess', false, 'Containers');
-    addNode('W05_BESS', 'WH-3 BESS Container Staging Yard', 'IO', 1600, bessY, 50, 1, 'z_bess', false, 'Containers');
+    addNode('B_BESS_Buf', 'BESS Pack Buffer Bank (Min. 20 Packs)', 'B', 2700, lowerY + 160, 50, 1, 'z_bess', false, 'Packs');
+    addNode('BESS_Stack', 'BESS Module/Pack Stacking & Rigging', 'M', 2700, bessY, 2, 45, 'z_bess', false, 'Packs');
+    addNode('BESS_Plate', 'Cold Plate Cooling Integration', 'M', 2500, bessY, 2, 35, 'z_bess', false, 'Racks');
+    addNode('BESS_Weld', '1500V DC Busbar Welder', 'M', 2300, bessY, 2, 40, 'z_bess', false, 'Racks');
+    addNode('BESS_BMS', 'HV String BMS Controller Cell', 'M', 2100, bessY, 2, 30, 'z_bess', false, 'Racks');
+    addNode('BESS_Test', '1500V Megawatt Hipot Cycler', 'M', 1900, bessY, 2, 120, 'z_bess', false, 'Racks');
+    addNode('BESS_Gantry', 'Twin 30T Gantry Crane Bay', 'M', 1700, bessY, 2, 60, 'z_bess', false, 'Containers');
+    addNode('W05_BESS', 'WH-3 BESS Container Staging Yard', 'IO', 1480, bessY, 50, 1, 'z_bess', false, 'Containers');
 
     // --- WH-4 MATERIAL DOCK ---
     addNode('W05_Mat_In', 'WH-4 Material Delivery Dock', 'IO', 3220, lowerY, 15000, 0.01, 'z4', false, 'Trays');
@@ -436,8 +439,9 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     addLink('T_QG', 'W03_Out');
     addLink('W03_Out', 'W04_Out');
 
-    // Branch to BESS Integration Line
-    addLink('B04', 'BESS_Stack');
+    // Branch to BESS Integration Line (Fed directly from Pack Marriage M01 through Buffer Bank)
+    addLink('M01', 'B_BESS_Buf');
+    addLink('B_BESS_Buf', 'BESS_Stack');
     addLink('BESS_Stack', 'BESS_Plate');
     addLink('BESS_Plate', 'BESS_Weld');
     addLink('BESS_Weld', 'BESS_BMS');
@@ -453,7 +457,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       'Z4: PACK MARRIAGE & ASSEMBLY': ['W05_Mat_In', 'B_Mat', 'P01', 'P02', 'M01', 'M02', 'M03', 'M04', 'B05', 'E01'],
       'Z5: END-OF-LINE TESTING & QUALITY': ['B06', 'T01', 'T02', ...cyclerNodes, 'T_QG'],
       'Z8: PACKAGING & FINISHED STORE (4-DAY BUFFER)': ['W03_Out', 'W04_Out'],
-      'Z_BESS: BESS CONTAINER & RACK INTEGRATION': ['BESS_Stack', 'BESS_Plate', 'BESS_Weld', 'BESS_BMS', 'BESS_Test', 'BESS_Gantry', 'W05_BESS'],
+      'Z_BESS: BESS CONTAINER & RACK INTEGRATION': ['B_BESS_Buf', 'BESS_Stack', 'BESS_Plate', 'BESS_Weld', 'BESS_BMS', 'BESS_Test', 'BESS_Gantry', 'W05_BESS'],
     };
 
     // Store in refs
@@ -466,6 +470,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     nodes['B02'].inventory = 250;
     nodes['B03'].inventory = 12;
     nodes['B04'].inventory = 15;
+    nodes['B_BESS_Buf'].inventory = 20; // Min. 20 Pack buffer bank initialized
     nodes['B_Mat'].inventory = 120;
     nodes['W03_Out'].inventory = 280;
   }, [FACTORY_H, stackerCycle, weldCycle, cyclerCycle, requiredLineTakt, cellsPerPack, tOCV, tStack, tCln, tFpc, tWeld, tCcd, tCycler]);
@@ -923,6 +928,20 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             } else if (id === 'CCD_Sort') {
               const isDefect = Math.random() < (defectRate * 1.2) / 100;
               targetId = isDefect && availableNexts.includes('Q_Bead_Reject') ? 'Q_Bead_Reject' : 'B04';
+            } else if (id === 'M01') {
+              // Pack Marriage Robot M01 distributes finished packs to EV Line (M02) and BESS Buffer Bank (B_BESS_Buf)
+              const bessBuf = nodes['B_BESS_Buf'];
+              if (bessBuf && bessBuf.inventory < 20 && availableNexts.includes('B_BESS_Buf')) {
+                // Priority: Keep BESS Buffer at minimum 20 Packs
+                targetId = 'B_BESS_Buf';
+              } else if (availableNexts.includes('B_BESS_Buf') && Math.random() < 0.10) {
+                // Nominal ~10% flow allocation to BESS utility line
+                targetId = 'B_BESS_Buf';
+              } else if (availableNexts.includes('M02')) {
+                targetId = 'M02';
+              } else {
+                targetId = availableNexts[0];
+              }
             } else {
               availableNexts.sort((a, b) => nodes[a].inventory - nodes[b].inventory);
               targetId = availableNexts[0];
@@ -950,7 +969,17 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                 if (id.startsWith('S_BOT_') || id.startsWith('W_') || id === 'CCD_Sort' || id === 'B04') {
                   pType = 'module';
                 }
-                if (id.startsWith('M0') || id.startsWith('B05') || id.startsWith('E01') || id.startsWith('B06') || id.startsWith('T') || id.startsWith('CY_') || id.startsWith('W03')) {
+                if (
+                  id.startsWith('M0') ||
+                  id.startsWith('B05') ||
+                  id.startsWith('E01') ||
+                  id.startsWith('B06') ||
+                  id.startsWith('T') ||
+                  id.startsWith('CY_') ||
+                  id.startsWith('W03') ||
+                  id === 'B_BESS_Buf' ||
+                  id.startsWith('BESS_')
+                ) {
                   pType = 'pack';
                 }
                 if (id.startsWith('P0') || id === 'B_Mat' || id === 'W05_Mat_In') {
@@ -1364,96 +1393,119 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
   return (
     <div className={`flex h-full w-full overflow-hidden relative select-none transition-colors duration-200 ${
-      isDark ? 'bg-[#0F1115] text-[#D1D5DB]' : 'bg-slate-50 text-slate-800'
+      isDark ? 'bg-[#0B0C0E] text-[#D1D5DB]' : 'bg-slate-50 text-slate-800'
     }`}>
       {/* Floating Operational Controller Drawer (Left) */}
       <div
-        className={`fixed top-16 left-0 bottom-0 z-30 backdrop-blur-md border-r transition-all duration-300 flex flex-col ${
-          isDark ? 'bg-[#111318]/95 border-[#2D3139]' : 'bg-white/95 border-slate-200 shadow-xl'
-        } ${isControlPanelOpen ? 'w-96 shadow-2xl' : 'w-10'}`}
+        className={`fixed top-16 left-0 bottom-0 z-30 overflow-hidden border-r transition-all duration-300 flex flex-col ${
+          isDark
+            ? 'bg-[#0B0D14]/80 border-[#2D3139]/80 shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
+            : 'bg-white/80 border-slate-200/90 shadow-2xl'
+        } ${isControlPanelOpen ? 'w-96' : 'w-10'}`}
       >
+        {/* Aerial Plant Layout Background Image with Frosted Glass Morphism Overlay */}
+        <div className="absolute inset-0 pointer-events-none select-none z-0 overflow-hidden">
+          <img
+            src={plantOpsAerialImg}
+            alt="Plant Operations Complex"
+            referrerPolicy="no-referrer"
+            className="w-full h-full object-cover object-center scale-110 opacity-30 dark:opacity-20 filter blur-[1.2px] transition-all duration-500"
+          />
+          {/* Frosted glass morphism blur & gradient backdrop */}
+          <div
+            className={`absolute inset-0 backdrop-blur-2xl ${
+              isDark
+                ? 'bg-gradient-to-b from-[#0B0D14]/92 via-[#0F1422]/85 to-[#0B0D14]/94'
+                : 'bg-gradient-to-b from-white/94 via-slate-50/88 to-white/95'
+            }`}
+          />
+          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent dark:via-white/5 pointer-events-none" />
+        </div>
+
         {/* Toggle Button */}
         <button
           onClick={() => setIsControlPanelOpen(!isControlPanelOpen)}
-          className="absolute -right-3.5 top-6 bg-blue-600 hover:bg-blue-500 text-white p-1 rounded-full border border-blue-400/40 shadow-lg z-40"
+          className="absolute -right-3.5 top-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white p-1 rounded-full border border-blue-300/40 shadow-[0_0_12px_rgba(37,99,235,0.5)] z-40 transition-transform transform hover:scale-110"
         >
           {isControlPanelOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
 
         {isControlPanelOpen && (
-          <div className="flex flex-col h-full overflow-hidden">
-            {/* Control Panel Header */}
-            <div className={`p-4 border-b flex items-center justify-between ${
-              isDark ? 'border-[#2D3139] bg-[#1A1D23]' : 'border-slate-200 bg-slate-50'
+          <div className="relative z-10 flex flex-col h-full overflow-hidden">
+            {/* Control Panel Header with Frosted Glass styling */}
+            <div className={`p-4 border-b flex items-center justify-between backdrop-blur-xl ${
+              isDark ? 'border-white/10 bg-black/20' : 'border-slate-200/80 bg-white/40'
             }`}>
-              <div className={`flex items-center gap-2 font-bold uppercase text-xs tracking-wider ${
+              <div className={`flex items-center gap-2 font-extrabold uppercase text-xs tracking-wider ${
                 isDark ? 'text-white' : 'text-slate-900'
               }`}>
-                <Sliders className="w-4 h-4 text-blue-500" />
+                <div className="p-1 rounded-lg bg-blue-500/20 border border-blue-400/30 text-blue-400">
+                  <Sliders className="w-4 h-4" />
+                </div>
                 <span>Plant Operations Controller</span>
               </div>
-              <span className="text-[10px] font-mono text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
+              <span className="text-[10px] font-mono text-emerald-500 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold backdrop-blur-md">
                 Auto-Scaling
               </span>
             </div>
 
-            {/* Navigation Tabs */}
-            <div className={`flex border-b text-[11px] font-medium ${
-              isDark ? 'border-[#2D3139] bg-[#0F1115]' : 'border-slate-200 bg-slate-100'
+            {/* Navigation Tabs - Frosted Glass Bar */}
+            <div className={`flex border-b text-[11px] font-medium backdrop-blur-xl ${
+              isDark ? 'border-white/10 bg-black/30' : 'border-slate-200/80 bg-slate-100/60'
             }`}>
               <button
                 onClick={() => setActiveControlTab('capacity')}
-                className={`flex-1 py-2.5 text-center transition-colors border-b-2 ${
+                className={`flex-1 py-2.5 text-center transition-all border-b-2 font-semibold ${
                   activeControlTab === 'capacity'
-                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-[#111318]' : 'text-blue-700 bg-white')
-                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200' : 'border-transparent text-slate-500 hover:text-slate-900'
+                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-white/10 shadow-inner' : 'text-blue-700 bg-white/90 shadow-xs')
+                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5' : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                Capacity & BOM
+                Capacity
               </button>
               <button
                 onClick={() => setActiveControlTab('logistics')}
-                className={`flex-1 py-2.5 text-center transition-colors border-b-2 ${
+                className={`flex-1 py-2.5 text-center transition-all border-b-2 font-semibold ${
                   activeControlTab === 'logistics'
-                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-[#111318]' : 'text-blue-700 bg-white')
-                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200' : 'border-transparent text-slate-500 hover:text-slate-900'
+                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-white/10 shadow-inner' : 'text-blue-700 bg-white/90 shadow-xs')
+                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5' : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                Supply Logistics
+                Logistics
               </button>
               <button
                 onClick={() => setActiveControlTab('cycles')}
-                className={`flex-1 py-2.5 text-center transition-colors border-b-2 ${
+                className={`flex-1 py-2.5 text-center transition-all border-b-2 font-semibold ${
                   activeControlTab === 'cycles'
-                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-[#111318]' : 'text-blue-700 bg-white')
-                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200' : 'border-transparent text-slate-500 hover:text-slate-900'
+                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-white/10 shadow-inner' : 'text-blue-700 bg-white/90 shadow-xs')
+                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5' : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                Machine Cycles
+                Cycles
               </button>
               <button
                 onClick={() => setActiveControlTab('engine')}
-                className={`flex-1 py-2.5 text-center transition-colors border-b-2 ${
+                className={`flex-1 py-2.5 text-center transition-all border-b-2 font-semibold ${
                   activeControlTab === 'engine'
-                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-[#111318]' : 'text-blue-700 bg-white')
-                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200' : 'border-transparent text-slate-500 hover:text-slate-900'
+                    ? 'border-blue-500 font-bold ' + (isDark ? 'text-white bg-white/10 shadow-inner' : 'text-blue-700 bg-white/90 shadow-xs')
+                    : isDark ? 'border-transparent text-gray-400 hover:text-gray-200 hover:bg-white/5' : 'border-transparent text-slate-500 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                Time Engine
+                Engine
               </button>
             </div>
 
-            {/* Control Tab Contents */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-5">
+            {/* Control Tab Contents with Glass Cards */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
               {/* TAB 1: CAPACITY & BOM */}
               {activeControlTab === 'capacity' && (
-                <div className="space-y-4 text-xs">
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                <div className="space-y-3.5 text-xs">
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Annual Capacity Target (GWh)</span>
-                      <span className="font-mono text-blue-500 font-bold text-sm">{gwhTarget} GWh</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Annual Capacity Target (GWh)</span>
+                      <span className="font-mono text-blue-500 font-bold text-sm bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">{gwhTarget} GWh</span>
                     </div>
                     <input
                       type="range"
@@ -1466,12 +1518,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     />
                   </div>
 
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Battery Pack Capacity (kWh)</span>
-                      <span className="font-mono text-purple-500 font-bold text-sm">{packKwh} kWh</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Battery Pack Capacity (kWh)</span>
+                      <span className="font-mono text-purple-500 font-bold text-sm bg-purple-500/10 px-2 py-0.5 rounded border border-purple-500/20">{packKwh} kWh</span>
                     </div>
                     <input
                       type="range"
@@ -1484,16 +1536,16 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className={`p-2.5 rounded border ${
-                      isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
+                      isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-white/80 border-slate-200/90'
                     }`}>
                       <label className="block text-[10px] text-gray-400 uppercase font-bold mb-1">Shifts per Day</label>
                       <select
                         value={shiftsCount}
                         onChange={e => setShiftsCount(parseInt(e.target.value))}
-                        className={`w-full border rounded px-2 py-1 font-mono ${
-                          isDark ? 'bg-[#0F1115] border-[#2D3139] text-white' : 'bg-white border-slate-300 text-slate-900'
+                        className={`w-full border rounded-lg px-2 py-1 font-mono text-xs ${
+                          isDark ? 'bg-[#0B0D14] border-white/10 text-white' : 'bg-white border-slate-300 text-slate-900'
                         }`}
                       >
                         <option value="1">1 Shift</option>
@@ -1502,15 +1554,15 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                       </select>
                     </div>
 
-                    <div className={`p-2.5 rounded border ${
-                      isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                    <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
+                      isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-white/80 border-slate-200/90'
                     }`}>
                       <label className="block text-[10px] text-gray-400 uppercase font-bold mb-1">Shift Duration</label>
                       <select
                         value={shiftHours}
                         onChange={e => setShiftHours(parseInt(e.target.value))}
-                        className={`w-full border rounded px-2 py-1 font-mono ${
-                          isDark ? 'bg-[#0F1115] border-[#2D3139] text-white' : 'bg-white border-slate-300 text-slate-900'
+                        className={`w-full border rounded-lg px-2 py-1 font-mono text-xs ${
+                          isDark ? 'bg-[#0B0D14] border-white/10 text-white' : 'bg-white border-slate-300 text-slate-900'
                         }`}
                       >
                         <option value="8">8 Hours</option>
@@ -1520,12 +1572,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     </div>
                   </div>
 
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Cells per Pack (BOM)</span>
-                      <span className="font-mono text-emerald-500 font-bold text-sm">{cellsPerPack} Bare Cells</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Cells per Pack (BOM)</span>
+                      <span className="font-mono text-emerald-500 font-bold text-sm bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">{cellsPerPack} Cells</span>
                     </div>
                     <input
                       type="range"
@@ -1539,12 +1591,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   </div>
 
                   {/* BESS Container Packs Slider */}
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Packs per BESS Container</span>
-                      <span className="font-mono text-cyan-500 font-bold text-sm">{packsPerBess} Racks / Container</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Packs per BESS Container</span>
+                      <span className="font-mono text-cyan-500 font-bold text-sm bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20">{packsPerBess} Racks</span>
                     </div>
                     <input
                       type="range"
@@ -1561,38 +1613,41 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     </div>
                   </div>
 
-                  {/* Calculated KPI Output Box */}
-                  <div className={`p-3 rounded border space-y-2 font-mono text-[11px] ${
-                    isDark ? 'bg-[#181B22] border-blue-500/30' : 'bg-blue-50 border-blue-200'
+                  {/* Calculated KPI Output Box with Glassmorphism */}
+                  <div className={`p-3.5 rounded-xl border space-y-2 font-mono text-[11px] backdrop-blur-xl ${
+                    isDark
+                      ? 'bg-blue-950/40 border-blue-500/30 text-gray-200 shadow-[0_4px_16px_rgba(0,0,0,0.3)]'
+                      : 'bg-blue-50/80 border-blue-200 text-slate-800 shadow-xs'
                   }`}>
-                    <div className="text-[10px] text-blue-600 font-bold uppercase tracking-wider">
-                      Derived Production Targets
+                    <div className="text-[10px] text-blue-500 font-extrabold uppercase tracking-wider flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-yellow-400" />
+                      <span>Derived Production Targets</span>
                     </div>
-                    <div className="flex justify-between text-gray-600 dark:text-gray-300">
-                      <span>Shift Target Output:</span>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500 dark:text-gray-400">Shift Target Output:</span>
                       <span className="font-bold text-slate-900 dark:text-white">{shiftPacksReq.toLocaleString()} Packs</span>
                     </div>
-                    <div className="flex justify-between text-gray-600 dark:text-gray-300">
-                      <span>Required Line Takt:</span>
-                      <span className="text-emerald-600 font-bold">{requiredLineTakt}s / Pack</span>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500 dark:text-gray-400">Required Line Takt:</span>
+                      <span className="text-emerald-500 font-bold">{requiredLineTakt}s / Pack</span>
                     </div>
-                    <div className="flex justify-between text-gray-600 dark:text-gray-300">
-                      <span>BESS String Target:</span>
-                      <span className="text-cyan-500 font-bold">{Math.floor((shiftPacksReq * 0.08) / packsPerBess)} Units ({Math.round(shiftPacksReq * 0.08)} Racks)</span>
+                    <div className="flex justify-between">
+                      <span className="text-gray-500 dark:text-gray-400">BESS Shift Target:</span>
+                      <span className="text-cyan-500 font-bold">{Math.min(12, Math.max(1, Math.round((shiftPacksReq / 1183) * 12)))} Cabinets</span>
                     </div>
-                    <div className="flex justify-between text-gray-600 dark:text-gray-300">
-                      <span>Auto-Scaled Threads:</span>
-                      <span className="text-amber-600 font-bold">
-                        {tStack} Stackers | {tWeld} Welders | {tCycler} Cyclers
+                    <div className="flex justify-between">
+                      <span className="text-gray-500 dark:text-gray-400">Auto-Scaled Threads:</span>
+                      <span className="text-amber-500 font-bold">
+                        {tStack} Stk • {tWeld} Wld • {tCycler} Cyc
                       </span>
                     </div>
                   </div>
 
                   <button
                     onClick={handleApplyCapacity}
-                    className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2.5 px-4 rounded text-xs transition shadow-lg flex items-center justify-center gap-2"
+                    className="w-full bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white font-bold py-2.5 px-4 rounded-xl text-xs transition shadow-[0_0_15px_rgba(37,99,235,0.4)] border border-blue-400/30 flex items-center justify-center gap-2 transform hover:scale-[1.01]"
                   >
-                    <Sparkles className="w-4 h-4 text-yellow-300" />
+                    <Sparkles className="w-4 h-4 text-yellow-300 animate-pulse" />
                     <span>Apply Settings & Scale Line Layout</span>
                   </button>
                 </div>
@@ -1600,13 +1655,13 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
               {/* TAB 2: SUPPLY LOGISTICS */}
               {activeControlTab === 'logistics' && (
-                <div className="space-y-4 text-xs">
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                <div className="space-y-3.5 text-xs">
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Inbound Cell Truck Frequency</span>
-                      <span className="font-mono text-emerald-500 font-bold">{inboundRate} Trucks / hr</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Inbound Cell Truck Frequency</span>
+                      <span className="font-mono text-emerald-500 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">{inboundRate} Trucks / hr</span>
                     </div>
                     <input
                       type="range"
@@ -1621,12 +1676,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   </div>
 
                   {/* Cells per Inbound Truck Slider */}
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Bare Cells per Inbound Truck</span>
-                      <span className="font-mono text-emerald-500 font-bold">{cellsPerInboundTruck.toLocaleString()} Cells / Truck</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Bare Cells per Inbound Truck</span>
+                      <span className="font-mono text-emerald-500 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">{cellsPerInboundTruck.toLocaleString()} Cells</span>
                     </div>
                     <input
                       type="range"
@@ -1643,12 +1698,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     </div>
                   </div>
 
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Outbound Dispatch Batch Size</span>
-                      <span className="font-mono text-orange-500 font-bold">{outboundBatch} Packs / Truck</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Outbound Dispatch Batch Size</span>
+                      <span className="font-mono text-orange-500 font-bold bg-orange-500/10 px-2 py-0.5 rounded border border-orange-500/20">{outboundBatch} Packs</span>
                     </div>
                     <input
                       type="range"
@@ -1662,12 +1717,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     <p className="text-[10px] text-gray-400">WH-2 Outbound Finished Product Dispatch Dock (4-Day Buffer)</p>
                   </div>
 
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Material & Components Freight</span>
-                      <span className="font-mono text-amber-500 font-bold">{materialRate} Trucks / hr</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Material & Components Freight</span>
+                      <span className="font-mono text-amber-500 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">{materialRate} Trucks / hr</span>
                     </div>
                     <input
                       type="range"
@@ -1685,13 +1740,13 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
               {/* TAB 3: MACHINE CYCLES */}
               {activeControlTab === 'cycles' && (
-                <div className="space-y-4 text-xs">
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                <div className="space-y-3.5 text-xs">
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Cell Stacker Cycle Time</span>
-                      <span className="font-mono text-amber-500 font-bold">{stackerCycle}s / Module</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Cell Stacker Cycle Time</span>
+                      <span className="font-mono text-amber-500 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">{stackerCycle}s / Module</span>
                     </div>
                     <input
                       type="range"
@@ -1704,12 +1759,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     />
                   </div>
 
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>Laser Busbar Weld Cycle Time</span>
-                      <span className="font-mono text-blue-500 font-bold">{weldCycle}s / Module</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Laser Busbar Weld Cycle Time</span>
+                      <span className="font-mono text-blue-500 font-bold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">{weldCycle}s / Module</span>
                     </div>
                     <input
                       type="range"
@@ -1722,12 +1777,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     />
                   </div>
 
-                  <div className={`p-3 rounded border space-y-3 ${
-                    isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
-                      <span className={isDark ? 'text-gray-300' : 'text-slate-700'}>EOL Cycler Charge/Discharge Test</span>
-                      <span className="font-mono text-rose-500 font-bold">{cyclerCycle}s / Pack</span>
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>EOL Cycler Charge/Discharge Test</span>
+                      <span className="font-mono text-rose-500 font-bold bg-rose-500/10 px-2 py-0.5 rounded border border-rose-500/20">{cyclerCycle}s / Pack</span>
                     </div>
                     <input
                       type="range"
@@ -1744,7 +1799,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
               {/* TAB 4: TIME ENGINE */}
               {activeControlTab === 'engine' && (
-                <div className="space-y-4 text-xs">
+                <div className="space-y-3.5 text-xs">
                   <div className="flex gap-2">
                     <button
                       onClick={() => {
@@ -1752,8 +1807,10 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                           setSimState(prev => ({ ...prev, isRunning: !prev.isRunning }));
                         }
                       }}
-                      className={`flex-1 py-2.5 rounded font-bold transition flex items-center justify-center gap-2 ${
-                        simState.isRunning ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-green-600 hover:bg-green-500 text-white'
+                      className={`flex-1 py-2.5 rounded-xl font-bold transition flex items-center justify-center gap-2 shadow-sm backdrop-blur-md ${
+                        simState.isRunning
+                          ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-[0_0_12px_rgba(217,119,6,0.3)]'
+                          : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-[0_0_12px_rgba(16,185,129,0.3)]'
                       }`}
                     >
                       {simState.isRunning ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
@@ -1775,8 +1832,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                         particlesRef.current = [];
                         trucksRef.current = [];
                       }}
-                      className={`border p-2 rounded ${
-                        isDark ? 'bg-[#1A1D23] border-[#2D3139] text-gray-300 hover:bg-[#252A36]' : 'bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200'
+                      className={`border p-2.5 rounded-xl backdrop-blur-md transition-all ${
+                        isDark ? 'bg-[#141720]/80 border-white/10 text-gray-300 hover:bg-white/10' : 'bg-white/80 border-slate-200 text-slate-700 hover:bg-white'
                       }`}
                       title="Reset Clock"
                     >
@@ -1786,7 +1843,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
                   <div className="space-y-2">
                     <div className="text-[10px] text-gray-400 uppercase font-bold">Simulation Warp Speed</div>
-                    <div className="grid grid-cols-4 gap-1 font-mono">
+                    <div className="grid grid-cols-4 gap-1.5 font-mono">
                       {[1, 5, 20, 100].map(s => (
                         <button
                           key={s}
@@ -1795,10 +1852,10 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                               setSimState(prev => ({ ...prev, simulationSpeed: s }));
                             }
                           }}
-                          className={`py-1.5 rounded text-center transition ${
+                          className={`py-1.5 rounded-lg text-center transition-all backdrop-blur-md ${
                             simState.simulationSpeed === s
-                              ? 'bg-blue-600 text-white font-bold'
-                              : isDark ? 'bg-[#1A1D23] text-gray-400 hover:text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                              ? 'bg-blue-600 text-white font-bold shadow-[0_0_10px_rgba(37,99,235,0.4)] border border-blue-400/30'
+                              : isDark ? 'bg-[#141720]/80 text-gray-400 hover:text-white border border-white/5' : 'bg-white/80 text-slate-700 hover:bg-white border border-slate-200'
                           }`}
                         >
                           {s}x
@@ -1815,23 +1872,25 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
       {/* Main Interactive Canvas Area */}
       <div className={`flex-1 flex flex-col h-full relative overflow-hidden ${isDark ? 'bg-[#0B0C0E]' : 'bg-[#F8FAFC]'}`}>
-        {/* Top Floating HUD Bar */}
-        <div className={`absolute top-4 left-14 right-4 z-20 flex flex-wrap items-center justify-between gap-3 px-4 py-2 rounded-lg border shadow-xl text-xs backdrop-blur-md ${
-          isDark ? 'bg-[#111318]/90 text-white border-[#2D3139]' : 'bg-white/90 text-slate-900 border-slate-200 shadow-sm'
+        {/* Top Floating HUD Bar - Frosted Glassmorphism with Shadow Glow */}
+        <div className={`absolute top-4 left-14 right-4 z-20 flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-2xl border text-xs backdrop-blur-2xl transition-all ${
+          isDark
+            ? 'bg-[#0B0D14]/80 text-white border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]'
+            : 'bg-white/85 text-slate-900 border-slate-200/90 shadow-[0_8px_24px_rgba(0,0,0,0.06)]'
         }`}>
           <div className="flex items-center gap-4 font-mono">
             <div>
-              <span className="text-[10px] text-gray-400 uppercase block">Shift Target</span>
-              <span className="font-bold text-amber-500">{shiftPacksReq.toLocaleString()} Packs</span>
+              <span className="text-[10px] text-gray-400 uppercase block font-semibold">Shift Target</span>
+              <span className="font-bold text-amber-500 drop-shadow-xs">{shiftPacksReq.toLocaleString()} Packs</span>
             </div>
-            <div className="w-[1px] h-6 bg-gray-300 dark:bg-[#2D3139]" />
+            <div className="w-[1px] h-6 bg-gray-300 dark:bg-white/10" />
             <div>
-              <span className="text-[10px] text-gray-400 uppercase block">Req. Line Takt</span>
-              <span className="font-bold text-emerald-500">{requiredLineTakt}s / Pack</span>
+              <span className="text-[10px] text-gray-400 uppercase block font-semibold">Req. Line Takt</span>
+              <span className="font-bold text-emerald-500 drop-shadow-xs">{requiredLineTakt}s / Pack</span>
             </div>
-            <div className="w-[1px] h-6 bg-gray-300 dark:bg-[#2D3139]" />
+            <div className="w-[1px] h-6 bg-gray-300 dark:bg-white/10" />
             <div>
-              <span className="text-[10px] text-gray-400 uppercase block">Active Threads</span>
+              <span className="text-[10px] text-gray-400 uppercase block font-semibold">Active Threads</span>
               <span className="font-bold text-blue-500">
                 {tStack} Stackers • {tWeld} Welders • {tCycler} Cyclers
               </span>
@@ -1852,11 +1911,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   life: 2.5,
                 });
               }}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold transition-all select-none ${
+              className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold transition-all select-none backdrop-blur-xl ${
                 isLayoutLocked
                   ? isDark
-                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/25'
-                    : 'bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100'
+                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/25 shadow-[0_0_10px_rgba(16,185,129,0.15)]'
+                    : 'bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 shadow-xs'
                   : isDark
                   ? 'bg-amber-500/20 text-amber-300 border border-amber-500/60 hover:bg-amber-500/30 animate-pulse'
                   : 'bg-amber-100 text-amber-900 border border-amber-400 hover:bg-amber-200 animate-pulse'
@@ -1950,35 +2009,35 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             </button>
             <button
               onClick={() => setCamera(prev => ({ ...prev, scale: Math.min(2.5, prev.scale * 1.2) }))}
-              className="p-1.5 hover:bg-slate-200 dark:hover:bg-[#252A36] rounded"
+              className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all"
               title="Zoom In"
             >
               <ZoomIn className="w-4 h-4" />
             </button>
             <button
               onClick={() => setCamera(prev => ({ ...prev, scale: Math.max(0.2, prev.scale / 1.2) }))}
-              className="p-1.5 hover:bg-slate-200 dark:hover:bg-[#252A36] rounded"
+              className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all"
               title="Zoom Out"
             >
               <ZoomOut className="w-4 h-4" />
             </button>
-            <button onClick={handleResetCamera} className="p-1.5 hover:bg-slate-200 dark:hover:bg-[#252A36] rounded" title="Fit Camera View">
+            <button onClick={handleResetCamera} className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all" title="Fit Camera View">
               <Maximize2 className="w-4 h-4" />
             </button>
-            <button onClick={handleResetLayout} className="p-1.5 hover:bg-slate-200 dark:hover:bg-[#252A36] rounded text-amber-500 hover:text-amber-400" title="Reset Floor Layout to Default Blueprint">
+            <button onClick={handleResetLayout} className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg text-amber-500 hover:text-amber-400 transition-all" title="Reset Floor Layout to Default Blueprint">
               <RotateCcw className="w-4 h-4" />
             </button>
           </div>
 
-          <div className={`backdrop-blur-md p-2 rounded-lg border flex flex-col gap-1.5 text-[10px] ${
-            isDark ? 'bg-[#111318]/90 border-[#2D3139]' : 'bg-white/90 border-slate-200 shadow-sm'
+          <div className={`backdrop-blur-2xl p-2.5 rounded-2xl border flex flex-col gap-1.5 text-[10px] shadow-lg transition-all ${
+            isDark ? 'bg-[#0B0D14]/80 border-white/10 text-gray-300' : 'bg-white/85 border-slate-200/90 text-slate-700 shadow-sm'
           }`}>
             <label className="flex items-center gap-1.5 cursor-pointer">
               <input
                 type="checkbox"
                 checked={showGrid}
                 onChange={e => setShowGrid(e.target.checked)}
-                className="rounded border-[#2D3139] text-blue-600 focus:ring-0"
+                className="rounded border-white/20 text-blue-600 focus:ring-0"
               />
               <span>Grid</span>
             </label>
@@ -1987,7 +2046,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                 type="checkbox"
                 checked={showParticles}
                 onChange={e => setShowParticles(e.target.checked)}
-                className="rounded border-[#2D3139] text-blue-600 focus:ring-0"
+                className="rounded border-white/20 text-blue-600 focus:ring-0"
               />
               <span>Particles</span>
             </label>
@@ -1996,36 +2055,38 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                 type="checkbox"
                 checked={showTrucks}
                 onChange={e => setShowTrucks(e.target.checked)}
-                className="rounded border-[#2D3139] text-blue-600 focus:ring-0"
+                className="rounded border-white/20 text-blue-600 focus:ring-0"
               />
               <span>Trucks</span>
             </label>
           </div>
         </div>
 
-        {/* Selected Node Inspector Drawer */}
+        {/* Selected Node Inspector Drawer - Frosted Glassmorphism Card */}
         {selectedNode && (
-          <div className={`absolute bottom-4 left-14 z-20 w-80 p-4 rounded-lg border shadow-2xl space-y-3 text-xs backdrop-blur-md ${
-            isDark ? 'bg-[#111318]/95 border-[#2D3139] text-white' : 'bg-white/95 border-slate-200 text-slate-900 shadow-lg'
+          <div className={`absolute bottom-4 left-14 z-20 w-84 p-4 rounded-2xl border space-y-3 text-xs backdrop-blur-2xl transition-all ${
+            isDark
+              ? 'bg-[#0B0D14]/85 border-white/10 text-white shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
+              : 'bg-white/90 border-slate-200/90 text-slate-900 shadow-2xl'
           }`}>
             <div className={`flex justify-between items-center border-b pb-2 ${
-              isDark ? 'border-[#2D3139]' : 'border-slate-200'
+              isDark ? 'border-white/10' : 'border-slate-200'
             }`}>
               <div>
-                <span className="font-bold text-sm block font-mono">{selectedNode.id}</span>
+                <span className="font-bold text-sm block font-mono text-blue-500 drop-shadow-xs">{selectedNode.id}</span>
                 <span className="text-[10px] text-gray-400">{selectedNode.label}</span>
               </div>
-              <button onClick={() => setSelectedNodeId(null)} className="text-gray-400 hover:text-slate-800 dark:hover:text-white">
+              <button onClick={() => setSelectedNodeId(null)} className="text-gray-400 hover:text-slate-800 dark:hover:text-white p-1 rounded-lg hover:bg-white/10 transition-all">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             {/* Live Position & Nudge Controls */}
-            <div className={`p-2 rounded border space-y-1.5 font-mono text-[11px] ${
-              isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+            <div className={`p-2.5 rounded-xl border space-y-2 font-mono text-[11px] backdrop-blur-xl ${
+              isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
             }`}>
               <div className="flex justify-between items-center">
-                <span className="text-[9px] text-gray-400 uppercase">Station Floor Coords</span>
+                <span className="text-[9px] text-gray-400 uppercase font-semibold">Station Floor Coords</span>
                 <span className="text-blue-500 font-bold">
                   X: {Math.round(selectedNode.x)} | Y: {Math.round(selectedNode.y)}
                 </span>
@@ -2035,7 +2096,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   onClick={() => {
                     selectedNode.x -= 20;
                   }}
-                  className="flex-1 py-1 rounded bg-gray-200 dark:bg-[#252A36] hover:bg-blue-600 hover:text-white transition"
+                  className="flex-1 py-1 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-blue-600 hover:text-white transition-all font-semibold"
                   title="Nudge Left 20px"
                 >
                   ← 20px
@@ -2044,7 +2105,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   onClick={() => {
                     selectedNode.x += 20;
                   }}
-                  className="flex-1 py-1 rounded bg-gray-200 dark:bg-[#252A36] hover:bg-blue-600 hover:text-white transition"
+                  className="flex-1 py-1 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-blue-600 hover:text-white transition-all font-semibold"
                   title="Nudge Right 20px"
                 >
                   → 20px
@@ -2053,7 +2114,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   onClick={() => {
                     selectedNode.y -= 20;
                   }}
-                  className="flex-1 py-1 rounded bg-gray-200 dark:bg-[#252A36] hover:bg-blue-600 hover:text-white transition"
+                  className="flex-1 py-1 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-blue-600 hover:text-white transition-all font-semibold"
                   title="Nudge Up 20px"
                 >
                   ↑ 20px
@@ -2062,17 +2123,17 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   onClick={() => {
                     selectedNode.y += 20;
                   }}
-                  className="flex-1 py-1 rounded bg-gray-200 dark:bg-[#252A36] hover:bg-blue-600 hover:text-white transition"
+                  className="flex-1 py-1 rounded-lg bg-gray-200 dark:bg-white/10 hover:bg-blue-600 hover:text-white transition-all font-semibold"
                   title="Nudge Down 20px"
                 >
                   ↓ 20px
                 </button>
               </div>
-              <div className="flex justify-between items-center pt-1 border-t border-gray-200 dark:border-[#2D3139]">
-                <span className="text-[9px] text-gray-400 uppercase">Floor Drag Mode</span>
+              <div className="flex justify-between items-center pt-1.5 border-t border-gray-200 dark:border-white/10">
+                <span className="text-[9px] text-gray-400 uppercase font-semibold">Floor Drag Mode</span>
                 <button
                   onClick={() => setIsLayoutLocked(prev => !prev)}
-                  className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${
+                  className={`flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[10px] font-bold transition-all ${
                     isLayoutLocked
                       ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/30'
                       : 'bg-amber-500/20 text-amber-300 border border-amber-500/50 hover:bg-amber-500/30'
@@ -2085,19 +2146,19 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             </div>
 
             <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
-              <div className={`p-2 rounded border ${
-                isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+              <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
+                isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
               }`}>
-                <span className="text-[9px] text-gray-400 uppercase block">Occupancy</span>
+                <span className="text-[9px] text-gray-400 uppercase block font-semibold">Occupancy</span>
                 <span className="font-bold">
                   {selectedNode.inventory} / {selectedNode.cap} {selectedNode.unit}
                 </span>
               </div>
 
-              <div className={`p-2 rounded border ${
-                isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+              <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
+                isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
               }`}>
-                <span className="text-[9px] text-gray-400 uppercase block">Station State</span>
+                <span className="text-[9px] text-gray-400 uppercase block font-semibold">Station State</span>
                 <span
                   className={`font-bold ${
                     selectedNode.status === 'working'
@@ -2112,18 +2173,32 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               </div>
             </div>
 
+            {selectedNode.id === 'B_BESS_Buf' && (
+              <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-[10px] text-amber-400 leading-tight backdrop-blur-xl">
+                <strong>BESS Input Buffer Bank:</strong> Dedicated supply line from Pack Marriage Robot M01. Maintains minimum 20 Battery Packs buffer reserve before BESS rack assembly.
+              </div>
+            )}
+
+            {selectedNode.id === 'M01' && (
+              <div className="p-2.5 rounded-xl bg-blue-500/15 border border-blue-500/30 text-[10px] text-blue-400 leading-tight backdrop-blur-xl">
+                <strong>Pack Marriage Robot:</strong> Marries module stacks (from B04) and trays (from TIM Dispenser P02). Distributes finished married packs to EV Line (M02) and BESS Buffer Bank (B_BESS_Buf).
+              </div>
+            )}
+
             {selectedNode.processingTime > 0 && (
-              <div className={`p-2.5 rounded border space-y-1 text-[11px] ${
-                isDark ? 'bg-[#181B22] border-[#2D3139]' : 'bg-slate-50 border-slate-200'
+              <div className={`p-2.5 rounded-xl border space-y-1 text-[11px] backdrop-blur-xl ${
+                isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
               }`}>
                 <div className="flex justify-between text-gray-500 dark:text-gray-400 font-mono">
-                  <span>Cycle Time vs Line Takt:</span>
-                  <span
-                    className={`font-bold ${
-                      selectedNode.processingTime > requiredLineTakt ? 'text-red-500' : 'text-emerald-500'
-                    }`}
-                  >
-                    {selectedNode.processingTime}s (Takt: {requiredLineTakt}s)
+                  <span>Station Cycle Time:</span>
+                  <span className="font-bold text-amber-500">
+                    {selectedNode.processingTime}s
+                  </span>
+                </div>
+                <div className="flex justify-between text-gray-500 dark:text-gray-400 font-mono text-[10px]">
+                  <span>Line Cadence Takt:</span>
+                  <span className="font-bold text-emerald-500">
+                    {requiredLineTakt}s / Exit
                   </span>
                 </div>
               </div>

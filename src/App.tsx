@@ -10,6 +10,7 @@ import { TariffEnergyOptimization } from './components/TariffEnergyOptimization'
 import { CapExCostingModel } from './components/CapExCostingModel';
 import { AiOptimizerModal } from './components/AiOptimizerModal';
 import { ShiftReportModal } from './components/ShiftReportModal';
+import roboticsLineImg from './assets/images/robotics_line_header_1786912826971.jpg';
 
 import {
   PLANT_METADATA,
@@ -107,8 +108,8 @@ export default function App() {
           const finalGood = Math.floor(finalPacksProduced * prev.currentYieldPct);
           const finalScrap = Math.floor(finalPacksProduced * (1 - prev.currentYieldPct) * 0.3);
           const finalRework = finalPacksProduced - finalGood - finalScrap;
-          const packsPerBess = prev.packsPerBessContainer || 24;
-          const bessContainers = Math.floor((finalGood * 0.08) / packsPerBess) || 1;
+          const bessTarget = 12;
+          const bessCabinets = Math.min(bessTarget, Math.floor((finalGood / Math.max(1, prev.targetPacks)) * bessTarget));
 
           return {
             ...prev,
@@ -122,7 +123,7 @@ export default function App() {
             reworkedPacks: finalRework,
             scrappedPacks: finalScrap,
             day4PacksProduced: finalGood,
-            bessContainersBuilt: bessContainers,
+            bessContainersBuilt: bessCabinets,
           };
         }
 
@@ -135,8 +136,8 @@ export default function App() {
         // Stock consumption (cells per pack)
         const cellStock = Math.max(0, 350000 - goodPacks * prev.cellsPerPackBom);
         const outboundStock = Math.min(10000, 3500 + goodPacks);
-        const packsPerBess = prev.packsPerBessContainer || 24;
-        const bessContainers = Math.floor((goodPacks * 0.08) / packsPerBess) || 1;
+        const bessTarget = 12;
+        const bessCabinets = Math.min(bessTarget, Math.floor((goodPacks / Math.max(1, prev.targetPacks)) * bessTarget));
 
         return {
           ...prev,
@@ -147,7 +148,7 @@ export default function App() {
           reworkedPacks,
           scrappedPacks,
           day4PacksProduced: goodPacks,
-          bessContainersBuilt: bessContainers,
+          bessContainersBuilt: bessCabinets,
           inboundCellStockUnits: cellStock,
           outboundPackStockUnits: outboundStock,
           daysBufferLevel: parseFloat((outboundStock / Math.max(1, prev.targetPacks)).toFixed(2)),
@@ -214,50 +215,65 @@ export default function App() {
             />
           </div>
         ) : (
-          <div className="w-full h-full flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar">
-            {activeTab === 'throughput' && (
-              <ThroughputDashboard
-                simState={simState}
-                setSimState={setSimState}
-                zones={zones}
-                theme={theme}
+          <div className="w-full h-full flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar relative">
+            {/* Subtle background image peering through negative space */}
+            <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden">
+              <img
+                src={roboticsLineImg}
+                alt=""
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover object-center opacity-10 blur-xl scale-105"
               />
-            )}
+              <div className={`absolute inset-0 ${
+                theme === 'dark' ? 'bg-[#0B0C0E]/80 backdrop-blur-xl' : 'bg-[#F8FAFC]/80 backdrop-blur-xl'
+              }`} />
+            </div>
 
-            {activeTab === 'mhe_personnel' && (
-              <MhePersonnelSimulator
-                mheFleet={mheFleet}
-                personnelList={personnelList}
-                simState={simState}
-                setSimState={setSimState}
-                theme={theme}
-              />
-            )}
+            <div className="relative z-10 p-4">
+              {activeTab === 'throughput' && (
+                <ThroughputDashboard
+                  simState={simState}
+                  setSimState={setSimState}
+                  zones={zones}
+                  theme={theme}
+                />
+              )}
 
-            {activeTab === 'inventory' && (
-              <WarehouseInventorySystem
-                warehouses={warehouses}
-                simState={simState}
-                setSimState={setSimState}
-                theme={theme}
-              />
-            )}
+              {activeTab === 'mhe_personnel' && (
+                <MhePersonnelSimulator
+                  mheFleet={mheFleet}
+                  personnelList={personnelList}
+                  simState={simState}
+                  setSimState={setSimState}
+                  theme={theme}
+                />
+              )}
 
-            {activeTab === 'machines' && (
-              <MachineCensusList zones={zones} theme={theme} />
-            )}
+              {activeTab === 'inventory' && (
+                <WarehouseInventorySystem
+                  warehouses={warehouses}
+                  simState={simState}
+                  setSimState={setSimState}
+                  theme={theme}
+                />
+              )}
 
-            {activeTab === 'workforce' && (
-              <WorkforcePayroll personnelList={personnelList} theme={theme} />
-            )}
+              {activeTab === 'machines' && (
+                <MachineCensusList zones={zones} theme={theme} />
+              )}
 
-            {activeTab === 'tariff' && (
-              <TariffEnergyOptimization theme={theme} />
-            )}
+              {activeTab === 'workforce' && (
+                <WorkforcePayroll personnelList={personnelList} theme={theme} />
+              )}
 
-            {activeTab === 'capex' && (
-              <CapExCostingModel theme={theme} />
-            )}
+              {activeTab === 'tariff' && (
+                <TariffEnergyOptimization theme={theme} />
+              )}
+
+              {activeTab === 'capex' && (
+                <CapExCostingModel theme={theme} />
+              )}
+            </div>
           </div>
         )}
       </main>

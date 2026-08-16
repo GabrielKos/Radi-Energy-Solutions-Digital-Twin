@@ -53,8 +53,10 @@ export const ShiftReportModal: React.FC<ShiftReportModalProps> = ({
   const energyCostUSD = Math.round(energyKwh * simState.currentTariffUSD);
 
   const packsPerBess = simState.packsPerBessContainer || 24;
-  const bessRacks = Math.round(goodPacks * 0.08);
-  const bessContainers = Math.floor(bessRacks / packsPerBess) || 1;
+  const bessTarget = 12;
+  const bessCabinets = Math.min(bessTarget, Math.floor((goodPacks / Math.max(1, targetPacks)) * bessTarget));
+  const bessContainers = Math.max(1, Math.floor(bessCabinets / 4));
+  const bessRacks = bessCabinets;
 
   // Print or Export Action
   const handleExportCSV = () => {
@@ -67,7 +69,7 @@ Scrapped Packs,${simState.scrappedPacks}
 Reworked Packs,${simState.reworkedPacks}
 Yield (FPY),${yieldPct}%
 Line OEE,${(simState.currentOeePct * 100).toFixed(1)}%
-BESS Containers Built,${bessContainers} (${bessRacks} Racks)
+BESS Storage Cabinets Built,${bessCabinets} / 12 (${bessContainers} Mega-Containers)
 Bare Cells Consumed,${cellsConsumed}
 Total Energy Consumed,${energyKwh} kWh
 Energy Cost,USD $${energyCostUSD}
