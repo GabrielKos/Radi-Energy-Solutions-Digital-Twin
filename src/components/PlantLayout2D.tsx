@@ -33,7 +33,8 @@ import {
   Move,
   Info
 } from 'lucide-react';
-import plantOpsAerialImg from '../assets/images/plant_ops_aerial_layout_1786912839030.jpg';
+import plantOpsBackgroundImg from '../assets/images/robotics.jpg';
+import { AuthModal } from './AuthModal';
 
 interface PlantLayout2DProps {
   zones: ProcessZone[];
@@ -143,12 +144,72 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
   // Station Re-arrangement Dragging & Lock State
   const [isLayoutLocked, setIsLayoutLocked] = useState<boolean>(true); // Default LOCKED to prevent accidental moves
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
+  const [pendingAction, setPendingAction] = useState<'unlock_layout' | 'apply_capacity' | null>(null);
+  const [authenticatedUser, setAuthenticatedUser] = useState<{ name: string; email: string } | null>(() => {
+    try {
+      const saved = localStorage.getItem('radi_digital_twin_auth');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
   const draggingNodeIdRef = useRef<string | null>(null);
   const dragOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const hasDraggedNodeRef = useRef<boolean>(false);
   const dragStartScreenRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [isNodeDragging, setIsNodeDragging] = useState<boolean>(false);
+
+  // Authentication Trigger Handler
+  const requestLayoutUnlock = () => {
+    if (!isLayoutLocked) {
+      // Re-lock
+      setIsLayoutLocked(true);
+      floatingTextsRef.current.push({
+        text: '🔒 Layout Locked (Modifications Protected)',
+        x: 1800,
+        y: FACTORY_H / 2 - 100,
+        color: '#10B981',
+        life: 2.5,
+      });
+      return;
+    }
+
+    if (authenticatedUser) {
+      setIsLayoutLocked(false);
+      floatingTextsRef.current.push({
+        text: `🔓 Edit Mode Enabled (${authenticatedUser.name})`,
+        x: 1800,
+        y: FACTORY_H / 2 - 100,
+        color: '#F59E0B',
+        life: 2.5,
+      });
+    } else {
+      setPendingAction('unlock_layout');
+      setIsAuthModalOpen(true);
+    }
+  };
+
+  const handleAuthSuccess = (user: { name: string; email: string }) => {
+    setAuthenticatedUser(user);
+    setIsAuthModalOpen(false);
+
+    if (pendingAction === 'unlock_layout') {
+      setIsLayoutLocked(false);
+      floatingTextsRef.current.push({
+        text: `🔓 Engineer Verified: ${user.name} (Edit Mode Active)`,
+        x: 1800,
+        y: FACTORY_H / 2 - 100,
+        color: '#10B981',
+        life: 3.0,
+      });
+    } else if (pendingAction === 'apply_capacity') {
+      executeApplyCapacity();
+    }
+    setPendingAction(null);
+  };
 
   // Display Toggles
   const [showGrid, setShowGrid] = useState<boolean>(true);
@@ -476,7 +537,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   }, [FACTORY_H, stackerCycle, weldCycle, cyclerCycle, requiredLineTakt, cellsPerPack, tOCV, tStack, tCln, tFpc, tWeld, tCcd, tCycler]);
 
   // Apply Capacity Settings Handler
-  const handleApplyCapacity = () => {
+  const executeApplyCapacity = () => {
     setIsRebuildingLayout(true);
     if (setSimState) {
       setSimState(prev => ({
@@ -503,6 +564,15 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       buildFactoryModel();
       setIsRebuildingLayout(false);
     }, 400);
+  };
+
+  const handleApplyCapacity = () => {
+    if (!authenticatedUser && isLayoutLocked) {
+      setPendingAction('apply_capacity');
+      setIsAuthModalOpen(true);
+      return;
+    }
+    executeApplyCapacity();
   };
 
   // Rebuild factory on initial load or parameter change
@@ -758,11 +828,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       inboundTimerRef.current -= simDt;
       if (inboundTimerRef.current <= 0) {
         if (!trucks.some(t => t.type === 'inbound_cell' && t.state === 'arriving')) {
+          const dockNode = nodes['W01'];
           trucks.push({
             id: `inbound-${Date.now()}`,
             type: 'inbound_cell',
-            x: -250,
-            y: nodes['W01'] ? nodes['W01'].y : 300,
+            x: -300,
+            y: dockNode ? dockNode.y : 300,
             state: 'arriving',
             timer: 0,
             batchSize: cellsPerInboundTruck,
@@ -774,11 +845,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       materialTimerRef.current -= simDt;
       if (materialTimerRef.current <= 0) {
         if (!trucks.some(t => t.type === 'material_tray' && t.state === 'arriving')) {
+          const dockNode = nodes['W05_Mat_In'];
           trucks.push({
             id: `material-${Date.now()}`,
             type: 'material_tray',
-            x: FACTORY_W + 250,
-            y: nodes['W05_Mat_In'] ? nodes['W05_Mat_In'].y : 700,
+            x: FACTORY_W + 300,
+            y: dockNode ? dockNode.y : 700,
             state: 'arriving',
             timer: 0,
             batchSize: 30,
@@ -789,11 +861,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
       if (nodes['W04_Out'] && nodes['W04_Out'].inventory >= outboundBatch) {
         if (!trucks.some(t => t.type === 'outbound_pack' && t.state === 'arriving')) {
+          const dockNode = nodes['W04_Out'];
           trucks.push({
             id: `outbound-${Date.now()}`,
             type: 'outbound_pack',
-            x: -250,
-            y: nodes['W04_Out'].y,
+            x: -300,
+            y: dockNode ? dockNode.y : 800,
             state: 'arriving',
             timer: 0,
             batchSize: outboundBatch,
@@ -801,27 +874,60 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         }
       }
 
-      // Update Truck Movements & Docking
+      // Update Truck Movements & Locked Docking Position
       const truckSpeed = 90;
       for (let i = trucks.length - 1; i >= 0; i--) {
         const t = trucks[i];
         const visualDt = (simDt / simState.simulationSpeed) * 2;
 
         if (t.state === 'arriving') {
-          if (t.type === 'material_tray') {
-            t.x -= visualDt * truckSpeed;
-            if (nodes['W05_Mat_In'] && t.x <= nodes['W05_Mat_In'].x + 60) {
+          if (t.type === 'inbound_cell') {
+            const dockNode = nodes['W01'];
+            const targetX = dockNode ? dockNode.x - 145 : -25;
+            if (dockNode) t.y = dockNode.y;
+
+            t.x += visualDt * truckSpeed;
+            if (t.x >= targetX) {
+              t.x = targetX; // Hard lock directly against dock bay
               t.state = 'docked';
               t.timer = 8;
             }
-          } else {
+          } else if (t.type === 'outbound_pack') {
+            const dockNode = nodes['W04_Out'];
+            const targetX = dockNode ? dockNode.x - 145 : -25;
+            if (dockNode) t.y = dockNode.y;
+
             t.x += visualDt * truckSpeed;
-            if (t.x >= 10) {
+            if (t.x >= targetX) {
+              t.x = targetX; // Hard lock directly against dispatch dock bay
+              t.state = 'docked';
+              t.timer = 8;
+            }
+          } else if (t.type === 'material_tray') {
+            const dockNode = nodes['W05_Mat_In'];
+            const targetX = dockNode ? dockNode.x + 35 : FACTORY_W - 50;
+            if (dockNode) t.y = dockNode.y;
+
+            t.x -= visualDt * truckSpeed;
+            if (t.x <= targetX) {
+              t.x = targetX; // Hard lock directly against WH-4 material dock bay
               t.state = 'docked';
               t.timer = 8;
             }
           }
         } else if (t.state === 'docked') {
+          // Keep strictly locked to dock coordinates during entire loading/unloading dwell
+          if (t.type === 'inbound_cell' && nodes['W01']) {
+            t.x = nodes['W01'].x - 145;
+            t.y = nodes['W01'].y;
+          } else if (t.type === 'outbound_pack' && nodes['W04_Out']) {
+            t.x = nodes['W04_Out'].x - 145;
+            t.y = nodes['W04_Out'].y;
+          } else if (t.type === 'material_tray' && nodes['W05_Mat_In']) {
+            t.x = nodes['W05_Mat_In'].x + 35;
+            t.y = nodes['W05_Mat_In'].y;
+          }
+
           t.timer -= visualDt;
           if (t.timer <= 0) {
             if (t.type === 'inbound_cell' && nodes['W01']) {
@@ -830,7 +936,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               floatingTexts.push({
                 id: `ft-${Date.now()}`,
                 text: `+${t.batchSize.toLocaleString()} Raw Cells`,
-                x: 120,
+                x: nodes['W01'].x,
                 y: nodes['W01'].y - 35,
                 color: '#10B981',
                 life: 2.5,
@@ -851,7 +957,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               floatingTexts.push({
                 id: `ft-${Date.now()}`,
                 text: `-${t.batchSize} Packs Dispatched`,
-                x: 120,
+                x: nodes['W04_Out'].x,
                 y: nodes['W04_Out'].y - 35,
                 color: '#F97316',
                 life: 2.5,
@@ -865,7 +971,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             if (t.x > FACTORY_W + 400) trucks.splice(i, 1);
           } else {
             t.x -= visualDt * truckSpeed;
-            if (t.x < -300) trucks.splice(i, 1);
+            if (t.x < -350) trucks.splice(i, 1);
           }
         }
       }
@@ -1403,11 +1509,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             : 'bg-white/80 border-slate-200/90 shadow-2xl'
         } ${isControlPanelOpen ? 'w-96' : 'w-10'}`}
       >
-        {/* Aerial Plant Layout Background Image with Frosted Glass Morphism Overlay */}
+        {/* Battery Pack Robotics Line Background Image with Frosted Glass Morphism Overlay */}
         <div className="absolute inset-0 pointer-events-none select-none z-0 overflow-hidden">
           <img
-            src={plantOpsAerialImg}
-            alt="Plant Operations Complex"
+            src={plantOpsBackgroundImg}
+            alt="Battery Pack Robotics Line"
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover object-center scale-110 opacity-30 dark:opacity-20 filter blur-[1.2px] transition-all duration-500"
           />
@@ -1988,22 +2094,13 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             isDark ? 'bg-[#111318]/90 border-[#2D3139] text-gray-300' : 'bg-white/90 border-slate-200 text-slate-700 shadow-sm'
           }`}>
             <button
-              onClick={() => {
-                setIsLayoutLocked(prev => !prev);
-                floatingTextsRef.current.push({
-                  text: isLayoutLocked ? '🔓 Edit Mode: Drag Stations to Move' : '🔒 Layout Locked (Accidental Moves Blocked)',
-                  x: 1800,
-                  y: FACTORY_H / 2 - 100,
-                  color: isLayoutLocked ? '#F59E0B' : '#10B981',
-                  life: 2.5,
-                });
-              }}
+              onClick={requestLayoutUnlock}
               className={`p-1.5 rounded transition-all ${
                 isLayoutLocked
                   ? 'text-emerald-500 hover:bg-emerald-500/15'
                   : 'text-amber-400 bg-amber-500/20 hover:bg-amber-500/30 animate-pulse'
               }`}
-              title={isLayoutLocked ? 'Layout is Locked: Click to Unlock Drag & Drop' : 'Layout is in Edit Mode: Click to Lock'}
+              title={isLayoutLocked ? 'Layout is Locked: Click to Authenticate & Unlock Edit Mode' : 'Layout is in Edit Mode: Click to Lock'}
             >
               {isLayoutLocked ? <Lock className="w-4 h-4 text-emerald-500" /> : <Unlock className="w-4 h-4 text-amber-500" />}
             </button>
@@ -2206,6 +2303,19 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           </div>
         )}
       </div>
+
+      {/* Engineer Authentication Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => {
+          setIsAuthModalOpen(false);
+          setPendingAction(null);
+        }}
+        onSuccess={handleAuthSuccess}
+        title="Plant Twin Engineering Verification"
+        description="To unlock real-time station rearrangement, machine thread scaling, and line parameters, please provide your engineering credentials."
+        theme={theme}
+      />
     </div>
   );
 };

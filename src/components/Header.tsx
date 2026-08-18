@@ -16,7 +16,8 @@ import {
   Users,
   BarChart3,
   FileText,
-  Award
+  Award,
+  FolderSync
 } from 'lucide-react';
 import { SimulationState, ThemeMode } from '../types/plant';
 import { RadiLogo } from './RadiLogo';
@@ -64,6 +65,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'workforce', label: 'Workforce & MHE Fleet', icon: Users },
     { id: 'tariff', label: 'Tariff & Energy', icon: Zap },
     { id: 'capex', label: 'CapEx & Financial Costing', icon: ShieldAlert },
+    { id: 'drive_sync', label: 'Collaborator Drive Sync', icon: FolderSync },
   ];
 
   const isDark = theme === 'dark';

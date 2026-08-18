@@ -8,6 +8,7 @@ import { MachineCensusList } from './components/MachineCensusList';
 import { WorkforcePayroll } from './components/WorkforcePayroll';
 import { TariffEnergyOptimization } from './components/TariffEnergyOptimization';
 import { CapExCostingModel } from './components/CapExCostingModel';
+import { GoogleDriveSync } from './components/GoogleDriveSync';
 import { AiOptimizerModal } from './components/AiOptimizerModal';
 import { ShiftReportModal } from './components/ShiftReportModal';
 import roboticsLineImg from './assets/images/robotics_line_header_1786912826971.jpg';
@@ -25,7 +26,7 @@ import { SimulationState, ProcessZone, WarehouseInfo, MheItem, PersonnelCategory
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>('light');
   const [activeTab, setActiveTab] = useState<
-    'layout' | 'throughput' | 'mhe_personnel' | 'inventory' | 'machines' | 'workforce' | 'tariff' | 'capex'
+    'layout' | 'throughput' | 'mhe_personnel' | 'inventory' | 'machines' | 'workforce' | 'tariff' | 'capex' | 'drive_sync'
   >('layout');
 
   const [zones, setZones] = useState<ProcessZone[]>(PROCESS_ZONES);
@@ -272,6 +273,30 @@ export default function App() {
 
               {activeTab === 'capex' && (
                 <CapExCostingModel theme={theme} />
+              )}
+
+              {activeTab === 'drive_sync' && (
+                <div className="max-w-5xl mx-auto py-2">
+                  <GoogleDriveSync
+                    folderId="1MkNiCIRYVzdyhKEeBJdsMKvw99m2Q_vz"
+                    fileId="1lD2IyLWSK_EqZl7xeQUq5gsPsJmVdyM0"
+                    onApplyModification={(modData) => {
+                      if (modData.targetPacks) {
+                        setSimState(prev => ({ ...prev, targetPacks: modData.targetPacks }));
+                      }
+                      if (modData.currentTaktSec) {
+                        setSimState(prev => ({ ...prev, currentTaktSec: modData.currentTaktSec }));
+                      }
+                      if (modData.warehouses) {
+                        setWarehouses(modData.warehouses);
+                      }
+                      if (modData.zones) {
+                        setZones(modData.zones);
+                      }
+                    }}
+                    theme={theme}
+                  />
+                </div>
               )}
             </div>
           </div>
