@@ -21,6 +21,7 @@ import {
   BarChart3
 } from 'lucide-react';
 import { SimulationState, ProcessZone, WarehouseInfo, ThemeMode } from '../types/plant';
+import { MarkdownRenderer } from './common/MarkdownRenderer';
 
 interface ChatMessage {
   id: string;
@@ -398,9 +399,11 @@ Select a quick question below or ask anything!`,
                           : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-blue-500/20'
                       }`}
                     >
-                      <div className="prose prose-sm dark:prose-invert max-w-none space-y-2 leading-relaxed whitespace-pre-wrap">
-                        {m.text}
-                      </div>
+                      {isBot ? (
+                        <MarkdownRenderer content={m.text} isDark={isDark} />
+                      ) : (
+                        <div className="leading-relaxed whitespace-pre-wrap">{m.text}</div>
+                      )}
                       <div
                         className={`text-[10px] mt-1.5 text-right font-mono ${
                           isBot
@@ -582,9 +585,7 @@ Select a quick question below or ask anything!`,
                   isDark ? 'bg-[#131926] border-white/10 text-gray-200' : 'bg-slate-50 border-slate-200 text-slate-800'
                 }`}
               >
-                <div className="prose prose-sm dark:prose-invert max-w-none leading-relaxed whitespace-pre-wrap">
-                  {aiReport}
-                </div>
+                <MarkdownRenderer content={aiReport} isDark={isDark} />
               </div>
             )}
           </div>

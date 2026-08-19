@@ -18,6 +18,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { SimulationState, ProcessZone, WarehouseInfo, ThemeMode } from '../types/plant';
+import { MarkdownRenderer } from './common/MarkdownRenderer';
 
 interface ChatMessage {
   id: string;
@@ -283,9 +284,11 @@ export const AiChatModal: React.FC<AiChatModalProps> = ({
                       : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-blue-500/20'
                   }`}
                 >
-                  <div className="prose prose-sm dark:prose-invert max-w-none space-y-2 leading-relaxed whitespace-pre-wrap">
-                    {m.text}
-                  </div>
+                  {isBot ? (
+                    <MarkdownRenderer content={m.text} isDark={isDark} />
+                  ) : (
+                    <div className="leading-relaxed whitespace-pre-wrap">{m.text}</div>
+                  )}
                   <div
                     className={`text-[10px] mt-1.5 text-right font-mono ${
                       isBot
