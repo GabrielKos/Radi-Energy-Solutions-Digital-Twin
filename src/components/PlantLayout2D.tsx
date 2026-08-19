@@ -34,6 +34,7 @@ import {
   Info
 } from 'lucide-react';
 import plantOpsBackgroundImg from '../assets/images/robotics.jpg';
+import plantFloorBackgroundImg from '../assets/images/plant.png';
 import { AuthModal } from './AuthModal';
 
 interface PlantLayout2DProps {
@@ -75,7 +76,7 @@ interface Particle {
   x: number;
   y: number;
   progress: number;
-  type: 'cell' | 'module' | 'pack' | 'tray';
+  type: 'cell' | 'cell_stack' | 'pack' | 'tray';
 }
 
 interface TruckVehicle {
@@ -89,7 +90,12 @@ interface TruckVehicle {
 }
 
 interface FloatingText {
-  id: string;
+  /**
+   * Optional: nothing reads it. These are drawn straight to the canvas and
+   * removed by index as their `life` expires, so there is no React key to
+   * satisfy — and four of the eight push sites never supplied one anyway.
+   */
+  id?: string;
   text: string;
   x: number;
   y: number;
@@ -144,28 +150,20 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
   // Station Re-arrangement Dragging & Lock State
   const [isLayoutLocked, setIsLayoutLocked] = useState<boolean>(true); // Default LOCKED to prevent accidental moves
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
-  const [pendingAction, setPendingAction] = useState<'unlock_layout' | 'apply_capacity' | null>(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
   const [authenticatedUser, setAuthenticatedUser] = useState<{ name: string; email: string } | null>(() => {
     try {
-      const saved = localStorage.getItem('radi_digital_twin_auth');
-      return saved ? JSON.parse(saved) : null;
+      const stored = localStorage.getItem('radi_digital_twin_auth');
+      return stored ? JSON.parse(stored) : null;
     } catch {
       return null;
     }
   });
 
-  const draggingNodeIdRef = useRef<string | null>(null);
-  const dragOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const hasDraggedNodeRef = useRef<boolean>(false);
-  const dragStartScreenRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
-  const [isNodeDragging, setIsNodeDragging] = useState<boolean>(false);
-
-  // Authentication Trigger Handler
   const requestLayoutUnlock = () => {
     if (!isLayoutLocked) {
-      // Re-lock
+      // Re-locking doesn't require password
       setIsLayoutLocked(true);
       floatingTextsRef.current.push({
         text: '🔒 Layout Locked (Modifications Protected)',
@@ -180,14 +178,13 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     if (authenticatedUser) {
       setIsLayoutLocked(false);
       floatingTextsRef.current.push({
-        text: `🔓 Edit Mode Enabled (${authenticatedUser.name})`,
+        text: `🔓 Edit Mode: Welcome, ${authenticatedUser.name}`,
         x: 1800,
         y: FACTORY_H / 2 - 100,
         color: '#F59E0B',
-        life: 2.5,
+        life: 3.0,
       });
     } else {
-      setPendingAction('unlock_layout');
       setIsAuthModalOpen(true);
     }
   };
@@ -195,21 +192,25 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const handleAuthSuccess = (user: { name: string; email: string }) => {
     setAuthenticatedUser(user);
     setIsAuthModalOpen(false);
-
-    if (pendingAction === 'unlock_layout') {
-      setIsLayoutLocked(false);
-      floatingTextsRef.current.push({
-        text: `🔓 Engineer Verified: ${user.name} (Edit Mode Active)`,
-        x: 1800,
-        y: FACTORY_H / 2 - 100,
-        color: '#10B981',
-        life: 3.0,
-      });
-    } else if (pendingAction === 'apply_capacity') {
-      executeApplyCapacity();
+    setIsLayoutLocked(false);
+    floatingTextsRef.current.push({
+      text: `🔓 Layout Unlocked: Verified ${user.name}`,
+      x: 1800,
+      y: FACTORY_H / 2 - 100,
+      color: '#10B981',
+      life: 3.5,
+    });
+    if (pendingAction) {
+      pendingAction();
+      setPendingAction(null);
     }
-    setPendingAction(null);
   };
+  const draggingNodeIdRef = useRef<string | null>(null);
+  const dragOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const hasDraggedNodeRef = useRef<boolean>(false);
+  const dragStartScreenRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [isNodeDragging, setIsNodeDragging] = useState<boolean>(false);
 
   // Display Toggles
   const [showGrid, setShowGrid] = useState<boolean>(true);
@@ -224,6 +225,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const [shiftsCount, setShiftsCount] = useState<number>(simState.operatingShiftsPerDay || 1);
   const [shiftHours, setShiftHours] = useState<number>(simState.shiftLengthHours || 10);
   const [cellsPerPack, setCellsPerPack] = useState<number>(simState.cellsPerPackBom || 108);
+
+  // Shift Target sliders — normally just a readout of gwhTarget/packKwh/
+  // shiftsCount, but dragging either slider sets a direct override (packs is
+  // authoritative; capacity is packs × packKwh). Editing any upstream driver
+  // clears the override so the two sliders go back to auto-tracking it.
+  const [targetOverridePacks, setTargetOverridePacks] = useState<number | null>(null);
 
   // Supply Chain Logistics Controls
   const [inboundRate, setInboundRate] = useState<number>(simState.inboundTruckRatePerHour || 2.0);
@@ -240,8 +247,18 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   // Live Calculated Target KPI Preview
   const annualPacksReq = Math.ceil((gwhTarget * 1000000) / Math.max(1, packKwh));
   const dailyPacksReq = Math.ceil(annualPacksReq / 240); // 240 operating days
-  const shiftPacksReq = Math.ceil(dailyPacksReq / Math.max(1, shiftsCount));
+  const autoShiftPacksReq = Math.ceil(dailyPacksReq / Math.max(1, shiftsCount));
+  // The slider override (see targetOverridePacks above) takes over here, so
+  // every downstream number below — required takt, auto-scaled threads,
+  // factory height, the HUD/summary readouts — reflects it automatically.
+  const shiftPacksReq = targetOverridePacks ?? autoShiftPacksReq;
   const requiredLineTakt = parseFloat(((shiftHours * 3600) / Math.max(1, shiftPacksReq)).toFixed(2));
+  const shiftCapacityKwh = Math.round(shiftPacksReq * packKwh);
+
+  // Any upstream driver of the auto shift target clears a standing override,
+  // so the two new sliders resume tracking it — "adjusts when related
+  // quantities are edited".
+  const clearTargetOverride = () => setTargetOverridePacks(null);
 
   // Auto-Scaled Machine Threads
   const tOCV = Math.max(1, Math.ceil(0.1 / requiredLineTakt));
@@ -351,11 +368,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     addNode('C_Clean', 'Plasma Surface Cleaner', 'M', 1000, midY, 20, 0.1, 'z1', false, 'Cells');
     addNode('B02', 'Pre-Stack Cell Buffer', 'B', 1160, midY, 500, 1, 'z1', false, 'Cells');
 
-    // --- ZONE 2: MODULE STACKING & BANDING (Z2) ---
+    // --- ZONE 2: CELL STACKING & BANDING (Z2) ---
     const stackCap = cellsPerPack * 2;
     const stackNodes = addParallelBlock(
       'S_BOT_',
-      'Stacker Robot',
+      'Cell Stacker Robot',
       'M',
       1360,
       midY,
@@ -367,23 +384,23 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       true,
       'Cells'
     );
-    addNode('S_Comp', 'Compress & Banding', 'M', 1560, midY, 4, 8, 'z2', false, 'Modules');
-    addNode('B03', 'Pre-Weld Module Buffer', 'B', 1720, midY, 25, 1, 'z2', false, 'Modules');
+    addNode('S_Comp', 'Compress & Banding', 'M', 1560, midY, 4, 8, 'z2', false, 'Cell Stacks');
+    addNode('B03', 'Pre-Weld Cell Stack Buffer', 'B', 1720, midY, 25, 1, 'z2', false, 'Cell Stacks');
 
     // --- ZONE 3: CLEAN & DRY ROOM BUSBAR WELDING (Z3) ---
-    const clnNodes = addParallelBlock('W_CLN_', 'Pole Laser Cleaner', 'M', 1880, midY, tCln, 2, 15, 'z3', 95, false, 'Modules');
-    addNode('B_C1', 'Clean Buffer #1', 'B', 2000, midY, 10, 1, 'z3', false, 'Modules');
+    const clnNodes = addParallelBlock('W_CLN_', 'Pole Laser Cleaner', 'M', 1880, midY, tCln, 2, 15, 'z3', 95, false, 'Cell Stacks');
+    addNode('B_C1', 'Clean Buffer #1', 'B', 2000, midY, 10, 1, 'z3', false, 'Cell Stacks');
 
-    const fpcNodes = addParallelBlock('W_FPC_', 'Busbar Inserter', 'M', 2120, midY, tFpc, 2, 20, 'z3', 95, false, 'Modules');
-    addNode('B_C2', 'Clean Buffer #2', 'B', 2240, midY, 10, 1, 'z3', false, 'Modules');
+    const fpcNodes = addParallelBlock('W_FPC_', 'Busbar Inserter', 'M', 2120, midY, tFpc, 2, 20, 'z3', 95, false, 'Cell Stacks');
+    addNode('B_C2', 'Clean Buffer #2', 'B', 2240, midY, 10, 1, 'z3', false, 'Cell Stacks');
 
-    const weldNodes = addParallelBlock('W_L_', '3kW Laser Welder', 'M', 2360, midY, tWeld, 2, weldCycle, 'z3', 95, false, 'Modules');
-    addNode('B_C3', 'Clean Buffer #3', 'B', 2480, midY, 10, 1, 'z3', false, 'Modules');
+    const weldNodes = addParallelBlock('W_L_', '3kW Laser Welder', 'M', 2360, midY, tWeld, 2, weldCycle, 'z3', 95, false, 'Cell Stacks');
+    addNode('B_C3', 'Clean Buffer #3', 'B', 2480, midY, 10, 1, 'z3', false, 'Cell Stacks');
 
-    const ccdNodes = addParallelBlock('W_CCD_', 'Bead Inspection', 'M', 2600, midY, tCcd, 2, 10, 'z3', 95, false, 'Modules');
-    addNode('CCD_Sort', 'Bead Quality Gateway', 'M', 2720, midY, 10, 0.1, 'z3', false, 'Modules');
-    addNode('Q_Bead_Reject', 'Bead Reject Quarantine', 'B', 2720, midY + 130, 50, 0.1, 'z3', false, 'Modules');
-    addNode('B04', 'Module Buffer', 'B', 2860, midY, 30, 1, 'z3', false, 'Modules');
+    const ccdNodes = addParallelBlock('W_CCD_', 'Bead Inspection', 'M', 2600, midY, tCcd, 2, 10, 'z3', 95, false, 'Cell Stacks');
+    addNode('CCD_Sort', 'Bead Quality Gateway', 'M', 2720, midY, 10, 0.1, 'z3', false, 'Cell Stacks');
+    addNode('Q_Bead_Reject', 'Bead Reject Quarantine', 'B', 2720, midY + 130, 50, 0.1, 'z3', false, 'Cell Stacks');
+    addNode('B04', 'Cell Stack Buffer', 'B', 2860, midY, 30, 1, 'z3', false, 'Cell Stacks');
 
     // --- ZONE 4: PACK MARRIAGE & ASSEMBLY (Z4 - Lower Serpentine Track) ---
     const lowerY = midY + 420;
@@ -438,7 +455,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     // Physically fed directly from Pack Marriage Robot M01 via dedicated 20-Pack Buffer Bank
     const bessY = lowerY + 340;
     addNode('B_BESS_Buf', 'BESS Pack Buffer Bank (Min. 20 Packs)', 'B', 2700, lowerY + 160, 50, 1, 'z_bess', false, 'Packs');
-    addNode('BESS_Stack', 'BESS Module/Pack Stacking & Rigging', 'M', 2700, bessY, 2, 45, 'z_bess', false, 'Packs');
+    addNode('BESS_Stack', 'BESS Cell Stack Stacking & Rigging', 'M', 2700, bessY, 2, 45, 'z_bess', false, 'Packs');
     addNode('BESS_Plate', 'Cold Plate Cooling Integration', 'M', 2500, bessY, 2, 35, 'z_bess', false, 'Racks');
     addNode('BESS_Weld', '1500V DC Busbar Welder', 'M', 2300, bessY, 2, 40, 'z_bess', false, 'Racks');
     addNode('BESS_BMS', 'HV String BMS Controller Cell', 'M', 2100, bessY, 2, 30, 'z_bess', false, 'Racks');
@@ -513,7 +530,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     // Plant zones definition mapping
     plantZonesRef.current = {
       'Z1: CELL RECEIVING & OCV SORTING': ['W01', 'W02', 'B01', ...ocvNodes, 'C_Sort', 'Q_Bay', 'C_Clean', 'B02'],
-      'Z2: MODULE STACKING & BANDING': [...stackNodes, 'S_Comp', 'B03'],
+      'Z2: CELL STACKING & BANDING': [...stackNodes, 'S_Comp', 'B03'],
       'Z3: CLEANROOM LASER BUSBAR WELDING': [...clnNodes, 'B_C1', ...fpcNodes, 'B_C2', ...weldNodes, 'B_C3', ...ccdNodes, 'CCD_Sort', 'Q_Bead_Reject', 'B04'],
       'Z4: PACK MARRIAGE & ASSEMBLY': ['W05_Mat_In', 'B_Mat', 'P01', 'P02', 'M01', 'M02', 'M03', 'M04', 'B05', 'E01'],
       'Z5: END-OF-LINE TESTING & QUALITY': ['B06', 'T01', 'T02', ...cyclerNodes, 'T_QG'],
@@ -537,7 +554,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   }, [FACTORY_H, stackerCycle, weldCycle, cyclerCycle, requiredLineTakt, cellsPerPack, tOCV, tStack, tCln, tFpc, tWeld, tCcd, tCycler]);
 
   // Apply Capacity Settings Handler
-  const executeApplyCapacity = () => {
+  const handleApplyCapacity = () => {
     setIsRebuildingLayout(true);
     if (setSimState) {
       setSimState(prev => ({
@@ -564,15 +581,6 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       buildFactoryModel();
       setIsRebuildingLayout(false);
     }, 400);
-  };
-
-  const handleApplyCapacity = () => {
-    if (!authenticatedUser && isLayoutLocked) {
-      setPendingAction('apply_capacity');
-      setIsAuthModalOpen(true);
-      return;
-    }
-    executeApplyCapacity();
   };
 
   // Rebuild factory on initial load or parameter change
@@ -828,12 +836,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       inboundTimerRef.current -= simDt;
       if (inboundTimerRef.current <= 0) {
         if (!trucks.some(t => t.type === 'inbound_cell' && t.state === 'arriving')) {
-          const dockNode = nodes['W01'];
           trucks.push({
             id: `inbound-${Date.now()}`,
             type: 'inbound_cell',
-            x: -300,
-            y: dockNode ? dockNode.y : 300,
+            x: -250,
+            y: nodes['W01'] ? nodes['W01'].y : 300,
             state: 'arriving',
             timer: 0,
             batchSize: cellsPerInboundTruck,
@@ -845,12 +852,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       materialTimerRef.current -= simDt;
       if (materialTimerRef.current <= 0) {
         if (!trucks.some(t => t.type === 'material_tray' && t.state === 'arriving')) {
-          const dockNode = nodes['W05_Mat_In'];
           trucks.push({
             id: `material-${Date.now()}`,
             type: 'material_tray',
-            x: FACTORY_W + 300,
-            y: dockNode ? dockNode.y : 700,
+            x: FACTORY_W + 250,
+            y: nodes['W05_Mat_In'] ? nodes['W05_Mat_In'].y : 700,
             state: 'arriving',
             timer: 0,
             batchSize: 30,
@@ -861,12 +867,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
       if (nodes['W04_Out'] && nodes['W04_Out'].inventory >= outboundBatch) {
         if (!trucks.some(t => t.type === 'outbound_pack' && t.state === 'arriving')) {
-          const dockNode = nodes['W04_Out'];
           trucks.push({
             id: `outbound-${Date.now()}`,
             type: 'outbound_pack',
-            x: -300,
-            y: dockNode ? dockNode.y : 800,
+            x: -250,
+            y: nodes['W04_Out'].y,
             state: 'arriving',
             timer: 0,
             batchSize: outboundBatch,
@@ -874,60 +879,50 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         }
       }
 
-      // Update Truck Movements & Locked Docking Position
+      // Update Truck Movements & Docking
       const truckSpeed = 90;
       for (let i = trucks.length - 1; i >= 0; i--) {
         const t = trucks[i];
         const visualDt = (simDt / simState.simulationSpeed) * 2;
 
         if (t.state === 'arriving') {
-          if (t.type === 'inbound_cell') {
-            const dockNode = nodes['W01'];
-            const targetX = dockNode ? dockNode.x - 145 : -25;
-            if (dockNode) t.y = dockNode.y;
-
+          if (t.type === 'material_tray') {
+            t.x -= visualDt * truckSpeed;
+            const targetX = nodes['W05_Mat_In'] ? nodes['W05_Mat_In'].x + 60 : FACTORY_W - 100;
+            if (t.x <= targetX) {
+              t.x = targetX;
+              t.state = 'docked';
+              t.timer = 8;
+            }
+          } else if (t.type === 'inbound_cell') {
             t.x += visualDt * truckSpeed;
+            const targetX = nodes['W01'] ? nodes['W01'].x - 145 : 10;
             if (t.x >= targetX) {
-              t.x = targetX; // Hard lock directly against dock bay
+              t.x = targetX;
               t.state = 'docked';
               t.timer = 8;
             }
           } else if (t.type === 'outbound_pack') {
-            const dockNode = nodes['W04_Out'];
-            const targetX = dockNode ? dockNode.x - 145 : -25;
-            if (dockNode) t.y = dockNode.y;
-
             t.x += visualDt * truckSpeed;
+            const targetX = nodes['W04_Out'] ? nodes['W04_Out'].x - 145 : 10;
             if (t.x >= targetX) {
-              t.x = targetX; // Hard lock directly against dispatch dock bay
-              t.state = 'docked';
-              t.timer = 8;
-            }
-          } else if (t.type === 'material_tray') {
-            const dockNode = nodes['W05_Mat_In'];
-            const targetX = dockNode ? dockNode.x + 35 : FACTORY_W - 50;
-            if (dockNode) t.y = dockNode.y;
-
-            t.x -= visualDt * truckSpeed;
-            if (t.x <= targetX) {
-              t.x = targetX; // Hard lock directly against WH-4 material dock bay
+              t.x = targetX;
               t.state = 'docked';
               t.timer = 8;
             }
           }
         } else if (t.state === 'docked') {
-          // Keep strictly locked to dock coordinates during entire loading/unloading dwell
+          // Absolute coordinate lock onto dock bay node to prevent overshooting or drift
           if (t.type === 'inbound_cell' && nodes['W01']) {
             t.x = nodes['W01'].x - 145;
             t.y = nodes['W01'].y;
+          } else if (t.type === 'material_tray' && nodes['W05_Mat_In']) {
+            t.x = nodes['W05_Mat_In'].x + 60;
+            t.y = nodes['W05_Mat_In'].y;
           } else if (t.type === 'outbound_pack' && nodes['W04_Out']) {
             t.x = nodes['W04_Out'].x - 145;
             t.y = nodes['W04_Out'].y;
-          } else if (t.type === 'material_tray' && nodes['W05_Mat_In']) {
-            t.x = nodes['W05_Mat_In'].x + 35;
-            t.y = nodes['W05_Mat_In'].y;
           }
-
           t.timer -= visualDt;
           if (t.timer <= 0) {
             if (t.type === 'inbound_cell' && nodes['W01']) {
@@ -1071,9 +1066,9 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                 }
 
                 // Spawn particle
-                let pType: 'cell' | 'module' | 'pack' | 'tray' = 'cell';
+                let pType: 'cell' | 'cell_stack' | 'pack' | 'tray' = 'cell';
                 if (id.startsWith('S_BOT_') || id.startsWith('W_') || id === 'CCD_Sort' || id === 'B04') {
-                  pType = 'module';
+                  pType = 'cell_stack';
                 }
                 if (
                   id.startsWith('M0') ||
@@ -1169,8 +1164,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         }
       }
 
-      ctx.fillStyle = isDark ? '#0B0C0E' : '#F8FAFC';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Transparent clear (not a solid fill) — the plant photo sits in a layer
+      // behind this canvas, and the diagram only paints opaque node boxes and
+      // lightly-tinted zone rectangles, so leaving the rest clear lets the
+      // photo read through the negative space between stations.
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       ctx.save();
       ctx.translate(camera.x, camera.y);
@@ -1198,7 +1196,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       // Draw Plant Zones Bounding Boxes
       const zoneColors: { [key: string]: string } = {
         'Z1: CELL RECEIVING & OCV SORTING': '59, 130, 246', // Blue
-        'Z2: MODULE STACKING & BANDING': '16, 185, 129', // Emerald
+        'Z2: CELL STACKING & BANDING': '16, 185, 129', // Emerald
         'Z3: CLEANROOM LASER BUSBAR WELDING': '139, 92, 246', // Purple
         'Z4: PACK MARRIAGE & ASSEMBLY': '245, 158, 11', // Amber
         'Z5: END-OF-LINE TESTING & QUALITY': '239, 68, 68', // Red
@@ -1405,12 +1403,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       if (showParticles) {
         particlesRef.current.forEach(p => {
           ctx.beginPath();
-          ctx.arc(p.x, p.y, p.type === 'pack' ? 6 : p.type === 'module' ? 4.5 : 3.5, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, p.type === 'pack' ? 6 : p.type === 'cell_stack' ? 4.5 : 3.5, 0, Math.PI * 2);
 
           if (p.type === 'cell') {
             ctx.fillStyle = '#10B981';
             ctx.shadowColor = '#10B981';
-          } else if (p.type === 'module') {
+          } else if (p.type === 'cell_stack') {
             ctx.fillStyle = '#F59E0B';
             ctx.shadowColor = '#F59E0B';
           } else if (p.type === 'pack') {
@@ -1503,26 +1501,31 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     }`}>
       {/* Floating Operational Controller Drawer (Left) */}
       <div
-        className={`fixed top-16 left-0 bottom-0 z-30 overflow-hidden border-r transition-all duration-300 flex flex-col ${
+        // No `overflow-hidden` here: the collapse button is positioned at
+        // -right-3.5, so clipping the drawer clipped the only control that
+        // reopens it. The inner content keeps its own overflow rules.
+        className={`absolute top-0 left-0 bottom-0 z-30 border-r transition-all duration-300 flex flex-col ${
           isDark
-            ? 'bg-[#0B0D14]/80 border-[#2D3139]/80 shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
-            : 'bg-white/80 border-slate-200/90 shadow-2xl'
+            ? 'bg-[#0B0D14]/55 border-[#2D3139]/80 shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
+            : 'bg-white/32 border-slate-200/90 shadow-2xl'
         } ${isControlPanelOpen ? 'w-96' : 'w-10'}`}
       >
         {/* Battery Pack Robotics Line Background Image with Frosted Glass Morphism Overlay */}
-        <div className="absolute inset-0 pointer-events-none select-none z-0 overflow-hidden">
+        <div className="absolute inset-0 pointer-events-none select-none z-0 overflow-hidden rounded-r-none">
           <img
             src={plantOpsBackgroundImg}
             alt="Battery Pack Robotics Line"
             referrerPolicy="no-referrer"
-            className="w-full h-full object-cover object-center scale-110 opacity-30 dark:opacity-20 filter blur-[1.2px] transition-all duration-500"
+            className="w-full h-full object-cover object-center scale-110 opacity-100 transition-all duration-500"
           />
-          {/* Frosted glass morphism blur & gradient backdrop */}
+          {/* Light tint only — the battery line photo shows through the
+              negative space; the panels above carry their own glass card
+              styling so they still read clearly against it. */}
           <div
-            className={`absolute inset-0 backdrop-blur-2xl ${
+            className={`absolute inset-0 ${
               isDark
-                ? 'bg-gradient-to-b from-[#0B0D14]/92 via-[#0F1422]/85 to-[#0B0D14]/94'
-                : 'bg-gradient-to-b from-white/94 via-slate-50/88 to-white/95'
+                ? 'bg-gradient-to-b from-[#0B0D14]/55 via-[#0F1422]/40 to-[#0B0D14]/62'
+                : 'bg-gradient-to-b from-white/58 via-white/42 to-white/64'
             }`}
           />
           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent dark:via-white/5 pointer-events-none" />
@@ -1531,7 +1534,9 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         {/* Toggle Button */}
         <button
           onClick={() => setIsControlPanelOpen(!isControlPanelOpen)}
-          className="absolute -right-3.5 top-6 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white p-1 rounded-full border border-blue-300/40 shadow-[0_0_12px_rgba(37,99,235,0.5)] z-40 transition-transform transform hover:scale-110"
+          title={isControlPanelOpen ? 'Collapse controller' : 'Expand controller'}
+          aria-label={isControlPanelOpen ? 'Collapse controller' : 'Expand controller'}
+          className="absolute -right-4 top-5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white p-1.5 rounded-full border-2 border-white dark:border-[#0B0D14] shadow-[0_2px_10px_rgba(0,0,0,0.35)] z-40 transition-transform transform hover:scale-110"
         >
           {isControlPanelOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
@@ -1539,18 +1544,20 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         {isControlPanelOpen && (
           <div className="relative z-10 flex flex-col h-full overflow-hidden">
             {/* Control Panel Header with Frosted Glass styling */}
-            <div className={`p-4 border-b flex items-center justify-between backdrop-blur-xl ${
+            {/* Title and badge stack vertically, and the row keeps clear of the
+                right edge, so the collapse button is never sat on. */}
+            <div className={`p-4 pr-8 border-b backdrop-blur-xl ${
               isDark ? 'border-white/10 bg-black/20' : 'border-slate-200/80 bg-white/40'
             }`}>
               <div className={`flex items-center gap-2 font-extrabold uppercase text-xs tracking-wider ${
                 isDark ? 'text-white' : 'text-slate-900'
               }`}>
-                <div className="p-1 rounded-lg bg-blue-500/20 border border-blue-400/30 text-blue-400">
+                <div className="p-1 rounded-lg bg-blue-500/20 border border-blue-400/30 text-blue-400 shrink-0">
                   <Sliders className="w-4 h-4" />
                 </div>
-                <span>Plant Operations Controller</span>
+                <span className="leading-tight">Plant Operations Controller</span>
               </div>
-              <span className="text-[10px] font-mono text-emerald-500 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold backdrop-blur-md">
+              <span className="inline-block mt-2 ml-8 text-[10px] font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold backdrop-blur-md">
                 Auto-Scaling
               </span>
             </div>
@@ -1607,7 +1614,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               {activeControlTab === 'capacity' && (
                 <div className="space-y-3.5 text-xs">
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Annual Capacity Target (GWh)</span>
@@ -1619,13 +1626,13 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                       max="30"
                       step="1"
                       value={gwhTarget}
-                      onChange={e => setGwhTarget(parseFloat(e.target.value))}
+                      onChange={e => { setGwhTarget(parseFloat(e.target.value)); clearTargetOverride(); }}
                       className="w-full accent-blue-500 cursor-pointer"
                     />
                   </div>
 
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Battery Pack Capacity (kWh)</span>
@@ -1637,19 +1644,19 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                       max="150"
                       step="5"
                       value={packKwh}
-                      onChange={e => setPackKwh(parseInt(e.target.value))}
+                      onChange={e => { setPackKwh(parseInt(e.target.value)); clearTargetOverride(); }}
                       className="w-full accent-purple-500 cursor-pointer"
                     />
                   </div>
 
                   <div className="grid grid-cols-2 gap-2.5">
                     <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
-                      isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-white/80 border-slate-200/90'
+                      isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-white/32 border-slate-200/90'
                     }`}>
                       <label className="block text-[10px] text-gray-400 uppercase font-bold mb-1">Shifts per Day</label>
                       <select
                         value={shiftsCount}
-                        onChange={e => setShiftsCount(parseInt(e.target.value))}
+                        onChange={e => { setShiftsCount(parseInt(e.target.value)); clearTargetOverride(); }}
                         className={`w-full border rounded-lg px-2 py-1 font-mono text-xs ${
                           isDark ? 'bg-[#0B0D14] border-white/10 text-white' : 'bg-white border-slate-300 text-slate-900'
                         }`}
@@ -1661,12 +1668,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     </div>
 
                     <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
-                      isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-white/80 border-slate-200/90'
+                      isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-white/32 border-slate-200/90'
                     }`}>
                       <label className="block text-[10px] text-gray-400 uppercase font-bold mb-1">Shift Duration</label>
                       <select
                         value={shiftHours}
-                        onChange={e => setShiftHours(parseInt(e.target.value))}
+                        onChange={e => { setShiftHours(parseInt(e.target.value)); clearTargetOverride(); }}
                         className={`w-full border rounded-lg px-2 py-1 font-mono text-xs ${
                           isDark ? 'bg-[#0B0D14] border-white/10 text-white' : 'bg-white border-slate-300 text-slate-900'
                         }`}
@@ -1678,8 +1685,65 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     </div>
                   </div>
 
+                  {/* Shift Target sliders — auto-tracks GWh/kWh/shifts/hours
+                      above, but either slider can be dragged to set a direct
+                      override (packs and capacity stay in lock-step via
+                      packKwh). Editing any driver above resets the override. */}
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
+                  }`}>
+                    <div className="flex justify-between items-center">
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>
+                        Shift Target (Packs){targetOverridePacks !== null ? <span className="text-amber-500 font-bold"> · Override</span> : null}
+                      </span>
+                      <span className="font-mono text-amber-500 font-bold text-sm bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">{shiftPacksReq.toLocaleString()} Packs</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="50"
+                      max="5000"
+                      step="1"
+                      value={shiftPacksReq}
+                      onChange={e => setTargetOverridePacks(parseInt(e.target.value))}
+                      className="w-full accent-amber-500 cursor-pointer"
+                    />
+                    {targetOverridePacks !== null && (
+                      <button
+                        onClick={clearTargetOverride}
+                        className={`text-[10px] font-semibold underline ${isDark ? 'text-gray-400 hover:text-white' : 'text-slate-500 hover:text-slate-800'}`}
+                      >
+                        Reset to auto ({autoShiftPacksReq.toLocaleString()} Packs from GWh target)
+                      </button>
+                    )}
+                  </div>
+
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
+                  }`}>
+                    <div className="flex justify-between items-center">
+                      <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>
+                        Shift Total Target Capacity{targetOverridePacks !== null ? <span className="text-amber-500 font-bold"> · Override</span> : null}
+                      </span>
+                      <span className="font-mono text-cyan-500 font-bold text-sm bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20">
+                        {(shiftCapacityKwh / 1000).toFixed(1)} MWh
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={50 * Math.max(1, packKwh)}
+                      max={5000 * Math.max(1, packKwh)}
+                      step={Math.max(1, packKwh)}
+                      value={shiftCapacityKwh}
+                      onChange={e => setTargetOverridePacks(Math.round(parseInt(e.target.value) / Math.max(1, packKwh)))}
+                      className="w-full accent-cyan-500 cursor-pointer"
+                    />
+                    <p className={`text-[10px] ${isDark ? 'text-gray-400' : 'text-slate-500'}`}>
+                      {shiftPacksReq.toLocaleString()} packs × {packKwh} kWh/pack — moves the pack slider above together with it.
+                    </p>
+                  </div>
+
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Cells per Pack (BOM)</span>
@@ -1698,7 +1762,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
                   {/* BESS Container Packs Slider */}
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Packs per BESS Container</span>
@@ -1763,7 +1827,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               {activeControlTab === 'logistics' && (
                 <div className="space-y-3.5 text-xs">
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Inbound Cell Truck Frequency</span>
@@ -1783,7 +1847,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
                   {/* Cells per Inbound Truck Slider */}
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Bare Cells per Inbound Truck</span>
@@ -1805,7 +1869,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   </div>
 
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Outbound Dispatch Batch Size</span>
@@ -1824,7 +1888,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   </div>
 
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Material & Components Freight</span>
@@ -1848,7 +1912,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               {activeControlTab === 'cycles' && (
                 <div className="space-y-3.5 text-xs">
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Cell Stacker Cycle Time</span>
@@ -1866,7 +1930,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   </div>
 
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Laser Busbar Weld Cycle Time</span>
@@ -1884,7 +1948,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   </div>
 
                   <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl transition-all ${
-                    isDark ? 'bg-[#141720]/80 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/80 border-slate-200/90 shadow-xs'
+                    isDark ? 'bg-[#141720]/32 border-white/10 shadow-[0_4px_16px_rgba(0,0,0,0.2)]' : 'bg-white/32 border-slate-200/90 shadow-xs'
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>EOL Cycler Charge/Discharge Test</span>
@@ -1939,7 +2003,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                         trucksRef.current = [];
                       }}
                       className={`border p-2.5 rounded-xl backdrop-blur-md transition-all ${
-                        isDark ? 'bg-[#141720]/80 border-white/10 text-gray-300 hover:bg-white/10' : 'bg-white/80 border-slate-200 text-slate-700 hover:bg-white'
+                        isDark ? 'bg-[#141720]/32 border-white/10 text-gray-300 hover:bg-white/10' : 'bg-white/32 border-slate-200 text-slate-700 hover:bg-white'
                       }`}
                       title="Reset Clock"
                     >
@@ -1961,7 +2025,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                           className={`py-1.5 rounded-lg text-center transition-all backdrop-blur-md ${
                             simState.simulationSpeed === s
                               ? 'bg-blue-600 text-white font-bold shadow-[0_0_10px_rgba(37,99,235,0.4)] border border-blue-400/30'
-                              : isDark ? 'bg-[#141720]/80 text-gray-400 hover:text-white border border-white/5' : 'bg-white/80 text-slate-700 hover:bg-white border border-slate-200'
+                              : isDark ? 'bg-[#141720]/32 text-gray-400 hover:text-white border border-white/5' : 'bg-white/32 text-slate-700 hover:bg-white border border-slate-200'
                           }`}
                         >
                           {s}x
@@ -1977,12 +2041,32 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       </div>
 
       {/* Main Interactive Canvas Area */}
-      <div className={`flex-1 flex flex-col h-full relative overflow-hidden ${isDark ? 'bg-[#0B0C0E]' : 'bg-[#F8FAFC]'}`}>
+      <div className="flex-1 flex flex-col h-full relative overflow-hidden">
+        {/* Plant Campus Background — sits behind the transparent canvas so the
+            diagram's negative space shows the real facility instead of a flat
+            fill. Only the HUD/legend/inspector panels get the glass treatment;
+            everything else here is the photo itself. */}
+        <div className="absolute inset-0 pointer-events-none select-none z-0 overflow-hidden">
+          <img
+            src={plantFloorBackgroundImg}
+            alt="Radi Energy Solutions Plant Campus"
+            referrerPolicy="no-referrer"
+            className="w-full h-full object-cover object-center opacity-20 dark:opacity-12 blur-[3px] scale-105"
+          />
+          {/* Near-opaque frosted pane — just a hint of the plant photo, not a
+              competing visual against the diagram. */}
+          <div className={`absolute inset-0 backdrop-blur-[3px] ${isDark ? 'bg-[#0B0C0E]/90' : 'bg-[#F8FAFC]/86'}`} />
+        </div>
+
         {/* Top Floating HUD Bar - Frosted Glassmorphism with Shadow Glow */}
-        <div className={`absolute top-4 left-14 right-4 z-20 flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-2xl border text-xs backdrop-blur-2xl transition-all ${
+        {/* left offset tracks the controller drawer — `left-14` only cleared the
+            collapsed rail, so the open drawer sat on top of the HUD. */}
+        <div className={`absolute top-4 right-4 z-20 flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-2xl border text-xs backdrop-blur-2xl transition-all duration-300 ${
+          isControlPanelOpen ? 'left-[25rem]' : 'left-14'
+        } ${
           isDark
-            ? 'bg-[#0B0D14]/80 text-white border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]'
-            : 'bg-white/85 text-slate-900 border-slate-200/90 shadow-[0_8px_24px_rgba(0,0,0,0.06)]'
+            ? 'bg-[#0B0D14]/55 text-white border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]'
+            : 'bg-white/60 text-slate-900 border-slate-200/90 shadow-[0_8px_24px_rgba(0,0,0,0.06)]'
         }`}>
           <div className="flex items-center gap-4 font-mono">
             <div>
@@ -2068,7 +2152,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
           onWheel={handleWheel}
-          className={`w-full h-full block ${
+          className={`relative z-10 w-full h-full block ${
             isNodeDragging
               ? 'cursor-grabbing'
               : hoveredNodeId
@@ -2127,7 +2211,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           </div>
 
           <div className={`backdrop-blur-2xl p-2.5 rounded-2xl border flex flex-col gap-1.5 text-[10px] shadow-lg transition-all ${
-            isDark ? 'bg-[#0B0D14]/80 border-white/10 text-gray-300' : 'bg-white/85 border-slate-200/90 text-slate-700 shadow-sm'
+            isDark ? 'bg-[#0B0D14]/55 border-white/10 text-gray-300' : 'bg-white/60 border-slate-200/90 text-slate-700 shadow-sm'
           }`}>
             <label className="flex items-center gap-1.5 cursor-pointer">
               <input
@@ -2167,7 +2251,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               : 'bg-white/90 border-slate-200/90 text-slate-900 shadow-2xl'
           }`}>
             <div className={`flex justify-between items-center border-b pb-2 ${
-              isDark ? 'border-white/10' : 'border-slate-200'
+              isDark ? 'border-white/10' : 'border-[#E7E3DC]'
             }`}>
               <div>
                 <span className="font-bold text-sm block font-mono text-blue-500 drop-shadow-xs">{selectedNode.id}</span>
@@ -2180,7 +2264,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
             {/* Live Position & Nudge Controls */}
             <div className={`p-2.5 rounded-xl border space-y-2 font-mono text-[11px] backdrop-blur-xl ${
-              isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
+              isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-slate-50/55 border-slate-200'
             }`}>
               <div className="flex justify-between items-center">
                 <span className="text-[9px] text-gray-400 uppercase font-semibold">Station Floor Coords</span>
@@ -2244,7 +2328,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
             <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
               <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
-                isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
+                isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-slate-50/55 border-slate-200'
               }`}>
                 <span className="text-[9px] text-gray-400 uppercase block font-semibold">Occupancy</span>
                 <span className="font-bold">
@@ -2253,7 +2337,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               </div>
 
               <div className={`p-2.5 rounded-xl border backdrop-blur-xl ${
-                isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
+                isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-slate-50/55 border-slate-200'
               }`}>
                 <span className="text-[9px] text-gray-400 uppercase block font-semibold">Station State</span>
                 <span
@@ -2284,7 +2368,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
             {selectedNode.processingTime > 0 && (
               <div className={`p-2.5 rounded-xl border space-y-1 text-[11px] backdrop-blur-xl ${
-                isDark ? 'bg-[#141720]/80 border-white/10' : 'bg-slate-50/90 border-slate-200'
+                isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-slate-50/55 border-slate-200'
               }`}>
                 <div className="flex justify-between text-gray-500 dark:text-gray-400 font-mono">
                   <span>Station Cycle Time:</span>

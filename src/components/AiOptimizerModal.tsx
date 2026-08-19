@@ -236,7 +236,7 @@ Select a quick question below or ask anything!`,
           reportText = `### 🤖 EAC & EU Duty-Free Export Compliance Audit
           
 **1. Value-Addition Verification**:
-- Cell module assembly and local HV harness termination in Zone Z6 achieve **41.2% local value addition**, satisfying EAC Rules of Origin Article 4(1) for **0% intra-community export tariff**.
+- Cell stack assembly and local HV harness termination in Zone Z6 achieve **41.2% local value addition**, satisfying EAC Rules of Origin Article 4(1) for **0% intra-community export tariff**.
 
 **2. Carbon Footprint Traceability**:
 - Battery Passport QR integration logged at Zone Z8 End-of-Line testing complies with **EU Regulation 2023/1542** for carbon footprint declaration and recycling efficiency.`;

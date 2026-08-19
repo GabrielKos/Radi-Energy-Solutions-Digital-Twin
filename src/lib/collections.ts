@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useSupabaseTable, TableAdapter } from './useSupabaseTable';
+import { withZoneRollups } from './derived';
 import {
   WarehouseInfo,
   PersonnelCategory,
@@ -15,58 +16,59 @@ import {
   CAPEX_ITEMS,
   PROCESS_ZONES,
 } from '../data/plantData';
-import { withZoneRollups } from './derived';
 
 // ---------- Warehouses ----------
 const warehouseAdapter: TableAdapter<WarehouseInfo> = {
   table: 'warehouses',
-  fromRow: (row: any): WarehouseInfo => ({
-    id: row.id,
-    name: row.name,
-    type: row.type ?? 'hazardous_cell',
-    areaSqm: Number(row.area_sqm ?? row.footprint_sq_meters ?? 0),
-    capacityUnits: Number(row.capacity_units ?? row.storage_capacity_units ?? 0),
-    currentStockPct: Number(row.current_stock_pct ?? 50),
-    rackingCostUSD: Number(row.racking_cost_usd ?? 0),
-    mheAssigned: Array.isArray(row.mhe_assigned) ? row.mhe_assigned : [],
-    safetyRating: row.safety_rating ?? 'Class 9',
-    daysOfBuffer: row.days_of_buffer !== null && row.days_of_buffer !== undefined ? Number(row.days_of_buffer) : undefined,
-    dailyProductionTarget: row.daily_production_target !== null && row.daily_production_target !== undefined ? Number(row.daily_production_target) : undefined,
-    description: row.description ?? '',
+  orderBy: 'name',
+  fromRow: r => ({
+    id: r.id,
+    name: r.name,
+    areaSqm: r.area_sqm,
+    type: r.type,
+    capacityUnits: r.capacity_units,
+    currentStockPct: r.current_stock_pct,
+    description: r.description ?? '',
+    rackingCostUSD: r.racking_cost_usd,
+    mheAssigned: r.mhe_assigned ?? [],
+    safetyRating: r.safety_rating ?? '',
+    daysOfBuffer: r.days_of_buffer ?? undefined,
+    dailyProductionTarget: r.daily_production_target ?? undefined,
   }),
-  toRow: (item: Partial<WarehouseInfo>) => ({
+  toRow: item => ({
     ...(item.id ? { id: item.id } : {}),
     ...(item.name !== undefined ? { name: item.name } : {}),
-    ...(item.type !== undefined ? { type: item.type } : {}),
     ...(item.areaSqm !== undefined ? { area_sqm: item.areaSqm } : {}),
+    ...(item.type !== undefined ? { type: item.type } : {}),
     ...(item.capacityUnits !== undefined ? { capacity_units: item.capacityUnits } : {}),
     ...(item.currentStockPct !== undefined ? { current_stock_pct: item.currentStockPct } : {}),
+    ...(item.description !== undefined ? { description: item.description } : {}),
     ...(item.rackingCostUSD !== undefined ? { racking_cost_usd: item.rackingCostUSD } : {}),
     ...(item.mheAssigned !== undefined ? { mhe_assigned: item.mheAssigned } : {}),
     ...(item.safetyRating !== undefined ? { safety_rating: item.safetyRating } : {}),
-    ...(item.description !== undefined ? { description: item.description } : {}),
     ...(item.daysOfBuffer !== undefined ? { days_of_buffer: item.daysOfBuffer } : {}),
     ...(item.dailyProductionTarget !== undefined ? { daily_production_target: item.dailyProductionTarget } : {}),
   }),
 };
-export const useWarehouses = () => useSupabaseTable<WarehouseInfo>(warehouseAdapter, WAREHOUSES);
+export const useWarehouses = () => useSupabaseTable<WarehouseInfo>(warehouseAdapter, () => WAREHOUSES);
 
 // ---------- Workforce ----------
 const workforceAdapter: TableAdapter<PersonnelCategory> = {
   table: 'workforce',
-  fromRow: (row: any): PersonnelCategory => ({
-    id: row.id,
-    ref: row.ref ?? `HR-${row.id}`,
-    zoneOrFunction: row.zone_or_function ?? row.category ?? '',
-    basis: row.basis ?? 'Fixed per Shift',
-    machineUnits: Number(row.machine_units ?? 1),
-    attendedUnits: Number(row.attended_units ?? 1),
-    shiftCrew: Number(row.shift_crew ?? row.headcount_per_shift ?? 1),
-    classification: row.classification ?? 'Direct',
-    monthlySalaryUSD: Number(row.monthly_salary_usd ?? 0),
-    annualPayrollUSD: Number(row.annual_payroll_usd ?? 0),
+  orderBy: 'ref',
+  fromRow: r => ({
+    id: r.id,
+    ref: r.ref,
+    zoneOrFunction: r.zone_or_function,
+    basis: r.basis ?? '',
+    machineUnits: r.machine_units ?? 0,
+    attendedUnits: r.attended_units ?? 0,
+    shiftCrew: r.shift_crew,
+    classification: r.classification,
+    monthlySalaryUSD: r.monthly_salary_usd,
+    annualPayrollUSD: r.annual_payroll_usd,
   }),
-  toRow: (item: Partial<PersonnelCategory>) => ({
+  toRow: item => ({
     ...(item.id ? { id: item.id } : {}),
     ...(item.ref !== undefined ? { ref: item.ref } : {}),
     ...(item.zoneOrFunction !== undefined ? { zone_or_function: item.zoneOrFunction } : {}),
@@ -79,22 +81,22 @@ const workforceAdapter: TableAdapter<PersonnelCategory> = {
     ...(item.annualPayrollUSD !== undefined ? { annual_payroll_usd: item.annualPayrollUSD } : {}),
   }),
 };
-export const useWorkforce = () => useSupabaseTable<PersonnelCategory>(workforceAdapter, PERSONNEL_SUMMARY);
+export const useWorkforce = () => useSupabaseTable<PersonnelCategory>(workforceAdapter, () => PERSONNEL_SUMMARY);
 
 // ---------- Tariff periods ----------
 const tariffAdapter: TableAdapter<TariffPeriod> = {
   table: 'tariff_periods',
   orderBy: 'start_hour',
-  fromRow: (row: any): TariffPeriod => ({
-    id: row.id,
-    name: row.name ?? row.period ?? '',
-    startHour: Number(row.start_hour ?? 0),
-    endHour: Number(row.end_hour ?? 24),
-    rateUGX: Number(row.rate_ugx ?? row.ugx_per_kwh ?? 0),
-    rateUSD: Number(row.rate_usd ?? row.usd_per_kwh ?? 0),
-    recommendedTask: row.recommended_task ?? '',
+  fromRow: r => ({
+    id: r.id,
+    name: r.name,
+    startHour: r.start_hour,
+    endHour: r.end_hour,
+    rateUGX: r.rate_ugx,
+    rateUSD: r.rate_usd,
+    recommendedTask: r.recommended_task ?? '',
   }),
-  toRow: (item: Partial<TariffPeriod>) => ({
+  toRow: item => ({
     ...(item.id ? { id: item.id } : {}),
     ...(item.name !== undefined ? { name: item.name } : {}),
     ...(item.startHour !== undefined ? { start_hour: item.startHour } : {}),
@@ -104,19 +106,14 @@ const tariffAdapter: TableAdapter<TariffPeriod> = {
     ...(item.recommendedTask !== undefined ? { recommended_task: item.recommendedTask } : {}),
   }),
 };
-export const useTariffPeriods = () => useSupabaseTable<TariffPeriod>(tariffAdapter, TARIFF_SCHEDULE);
+export const useTariffPeriods = () => useSupabaseTable<TariffPeriod>(tariffAdapter, () => TARIFF_SCHEDULE);
 
 // ---------- CapEx items ----------
 const capexAdapter: TableAdapter<CapExItem> = {
   table: 'capex_items',
-  fromRow: (row: any): CapExItem => ({
-    id: row.id,
-    code: row.code ?? `CAP-${row.id}`,
-    category: row.category,
-    costUSD: Number(row.cost_usd ?? 0),
-    color: row.color ?? '#3B82F6',
-  }),
-  toRow: (item: Partial<CapExItem>) => ({
+  orderBy: 'code',
+  fromRow: r => ({ id: r.id, code: r.code, category: r.category, costUSD: r.cost_usd, color: r.color }),
+  toRow: item => ({
     ...(item.id ? { id: item.id } : {}),
     ...(item.code !== undefined ? { code: item.code } : {}),
     ...(item.category !== undefined ? { category: item.category } : {}),
@@ -124,52 +121,52 @@ const capexAdapter: TableAdapter<CapExItem> = {
     ...(item.color !== undefined ? { color: item.color } : {}),
   }),
 };
-export const useCapexItems = () => useSupabaseTable<CapExItem>(capexAdapter, CAPEX_ITEMS);
+export const useCapexItems = () => useSupabaseTable<CapExItem>(capexAdapter, () => CAPEX_ITEMS);
 
 // ---------- Zones + Machines (joined) ----------
 const zoneShellAdapter: TableAdapter<Omit<ProcessZone, 'machines'>> = {
   table: 'zones',
-  orderBy: 'id',
-  fromRow: (row: any) => ({
-    id: row.id,
-    name: row.name,
-    wbsCode: row.wbs_code ?? '',
-    description: row.description ?? '',
-    machineUnitsCount: Number(row.machine_units_count ?? 0),
-    totalCostUSD: Number(row.total_cost_usd ?? 0),
-    shiftCrewDirect: Number(row.shift_crew_direct ?? 0),
-    color: row.color ?? '#3B82F6',
-    lineType: row.line_type ?? 'EV',
+  orderBy: 'wbs_code',
+  fromRow: r => ({
+    id: r.id,
+    name: r.name,
+    wbsCode: r.wbs_code,
+    description: r.description ?? '',
+    machineUnitsCount: 0, // recomputed after join, see useZonesWithMachines
+    totalCostUSD: 0,
+    shiftCrewDirect: r.shift_crew_direct ?? 0,
+    color: r.color,
+    lineType: r.line_type ?? undefined,
   }),
-  toRow: (item: Partial<Omit<ProcessZone, 'machines'>>) => ({
+  toRow: item => ({
     ...(item.id ? { id: item.id } : {}),
     ...(item.name !== undefined ? { name: item.name } : {}),
     ...(item.wbsCode !== undefined ? { wbs_code: item.wbsCode } : {}),
     ...(item.description !== undefined ? { description: item.description } : {}),
-    ...(item.machineUnitsCount !== undefined ? { machine_units_count: item.machineUnitsCount } : {}),
-    ...(item.totalCostUSD !== undefined ? { total_cost_usd: item.totalCostUSD } : {}),
     ...(item.shiftCrewDirect !== undefined ? { shift_crew_direct: item.shiftCrewDirect } : {}),
     ...(item.color !== undefined ? { color: item.color } : {}),
     ...(item.lineType !== undefined ? { line_type: item.lineType } : {}),
   }),
 };
 
-export const machineAdapter: TableAdapter<ProcessMachine> = {
+const machineAdapter: TableAdapter<ProcessMachine> = {
   table: 'machines',
-  fromRow: (row: any): ProcessMachine => ({
-    id: row.id,
-    zoneId: row.zone_id,
-    wbsCode: row.wbs_code ?? '',
-    name: row.name,
-    description: row.description ?? '',
-    cycleTimeSec: Number(row.cycle_time_sec ?? 30),
-    machinesCount: Number(row.machines_count ?? 1),
-    unitRateUSD: Number(row.unit_rate_usd ?? 0),
-    totalCostUSD: Number(row.total_cost_usd ?? 0),
-    status: row.status ?? 'running',
-    utilizationPct: Number(row.utilization_pct ?? 90),
+  orderBy: 'wbs_code',
+  fromRow: r => ({
+    id: r.id,
+    zoneId: r.zone_id,
+    wbsCode: r.wbs_code,
+    name: r.name,
+    description: r.description ?? '',
+    cycleTimeSec: Number(r.cycle_time_sec),
+    machinesCount: r.machines_count,
+    unitRateUSD: Number(r.unit_rate_usd),
+    totalCostUSD: 0, // recomputed, see withZoneRollups
+    status: r.status,
+    utilizationPct: Number(r.utilization_pct ?? 90),
+    packsPerCycle: Number(r.packs_per_cycle ?? 1),
   }),
-  toRow: (item: Partial<ProcessMachine>) => ({
+  toRow: item => ({
     ...(item.id ? { id: item.id } : {}),
     ...(item.zoneId !== undefined ? { zone_id: item.zoneId } : {}),
     ...(item.wbsCode !== undefined ? { wbs_code: item.wbsCode } : {}),
@@ -178,69 +175,52 @@ export const machineAdapter: TableAdapter<ProcessMachine> = {
     ...(item.cycleTimeSec !== undefined ? { cycle_time_sec: item.cycleTimeSec } : {}),
     ...(item.machinesCount !== undefined ? { machines_count: item.machinesCount } : {}),
     ...(item.unitRateUSD !== undefined ? { unit_rate_usd: item.unitRateUSD } : {}),
-    ...(item.totalCostUSD !== undefined ? { total_cost_usd: item.totalCostUSD } : {}),
     ...(item.status !== undefined ? { status: item.status } : {}),
     ...(item.utilizationPct !== undefined ? { utilization_pct: item.utilizationPct } : {}),
+    ...(item.packsPerCycle !== undefined ? { packs_per_cycle: item.packsPerCycle } : {}),
   }),
 };
 
-const initialZoneShells = PROCESS_ZONES.map(z => ({
-  id: z.id,
-  name: z.name,
-  wbsCode: z.wbsCode,
-  description: z.description,
-  machineUnitsCount: z.machineUnitsCount,
-  totalCostUSD: z.totalCostUSD,
-  shiftCrewDirect: z.shiftCrewDirect,
-  color: z.color,
-  lineType: z.lineType,
-}));
-
-const initialMachines: ProcessMachine[] = PROCESS_ZONES.flatMap(z =>
-  z.machines.map(m => ({ ...m, zoneId: z.id }))
-);
-
 /**
  * Joins the `zones` and `machines` tables client-side into the exact
- * ProcessZone[] shape the rest of the app (Floor Twin, Throughput, Machine Census) expects.
+ * ProcessZone[] shape the rest of the app (Floor Twin, Throughput, Machine
+ * Census) already expects, so those two screens need zero changes even
+ * though their data now comes from Supabase instead of the static file.
  */
 export function useZonesWithMachines() {
-  const zonesResult = useSupabaseTable(zoneShellAdapter, initialZoneShells);
-  const machinesResult = useSupabaseTable(machineAdapter, initialMachines);
+  const zonesResult = useSupabaseTable(
+    zoneShellAdapter,
+    () => PROCESS_ZONES.map(z => ({ ...z, machines: [] }))
+  );
+  const machinesResult = useSupabaseTable(
+    machineAdapter,
+    () => PROCESS_ZONES.flatMap(z => z.machines.map(m => ({ ...m, zoneId: z.id })))
+  );
 
   const zones: ProcessZone[] = useMemo(() => {
+    if (zonesResult.rows.length === 0 && machinesResult.rows.length === 0) {
+      return PROCESS_ZONES;
+    }
     return zonesResult.rows.map(zoneShell => {
-      const zoneMachines = machinesResult.rows.filter(m => m.zoneId === zoneShell.id);
-      return withZoneRollups({
-        ...zoneShell,
-        machines: zoneMachines,
-      });
+      const machines = machinesResult.rows.filter(m => m.zoneId === zoneShell.id);
+      return withZoneRollups({ ...zoneShell, machines });
     });
   }, [zonesResult.rows, machinesResult.rows]);
-
-  const addMachine = async (machine: Omit<ProcessMachine, 'id' | 'totalCostUSD'> & { zoneId: string }) => {
-    await machinesResult.insert({
-      ...machine,
-      totalCostUSD: (machine.unitRateUSD || 0) * (machine.machinesCount || 1),
-    });
-  };
-
-  const updateMachine = async (id: string, patch: Partial<ProcessMachine>) => {
-    await machinesResult.update(id, patch);
-  };
-
-  const deleteMachine = async (id: string) => {
-    await machinesResult.remove(id);
-  };
 
   return {
     zones,
     loading: zonesResult.loading || machinesResult.loading,
     error: zonesResult.error || machinesResult.error,
-    machinesTable: machinesResult,
-    zonesTable: zonesResult,
-    addMachine,
-    updateMachine,
-    deleteMachine,
+    // `totalCostUSD` is derived (unitRateUSD x machinesCount) and is never
+    // written to the database, so callers must not be required to supply it.
+    refetch: () => {
+      zonesResult.refetch();
+      machinesResult.refetch();
+    },
+    addMachine: machinesResult.insert as (
+      machine: Omit<ProcessMachine, 'id' | 'totalCostUSD'> & { zoneId: string }
+    ) => Promise<void>,
+    updateMachine: machinesResult.update,
+    deleteMachine: machinesResult.remove,
   };
 }
