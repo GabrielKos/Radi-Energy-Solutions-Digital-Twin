@@ -18,7 +18,8 @@ import {
   FileText,
   Award,
   Truck,
-  Lock
+  Lock,
+  History
 } from 'lucide-react';
 import { SimulationState, ThemeMode, TabId } from '../types/plant';
 import { RadiLogo } from './RadiLogo';
@@ -73,6 +74,7 @@ export const Header: React.FC<HeaderProps> = ({
     { id: 'workforce', label: 'Workforce', title: 'Workforce & Payroll Registry', icon: Users },
     { id: 'tariff', label: 'Tariff & Energy', title: 'Tariff & Energy Optimization', icon: Zap },
     { id: 'capex', label: 'CapEx', title: 'CapEx & Financial Costing', icon: ShieldAlert },
+    { id: 'changelog', label: 'Change Log', title: 'Audit Trail of Every Recorded Change', icon: History },
   ];
 
   const isDark = theme === 'dark';

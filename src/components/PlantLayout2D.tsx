@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ProcessZone, WarehouseInfo, SimulationState, MheItem, ThemeMode } from '../types/plant';
-import { requestEditAuthorization } from '../lib/editAuth';
+import { requestEditAuthorization, getRememberedEmail } from '../lib/editAuth';
+import { useStationPositions } from '../lib/stationPositions';
+import { classifyStation, drawEquipmentGlyph, EquipmentKind } from '../lib/equipmentGlyphs';
 import {
   Layers,
   Settings,
@@ -66,6 +68,13 @@ interface CanvasNode {
   isTransformer?: boolean;
   unit: string;
   zoneId: string;
+  /**
+   * Horizontal room this station's caption has before it would run into the
+   * neighbour on the same row. Computed once per layout build — the 40-cycler
+   * comb sits on an 80px pitch, so without a budget every caption there
+   * overlapped the two beside it into an unreadable smear.
+   */
+  labelWidth?: number;
 }
 
 interface Particle {
@@ -76,7 +85,7 @@ interface Particle {
   x: number;
   y: number;
   progress: number;
-  type: 'cell' | 'module' | 'pack' | 'tray';
+  type: 'cell' | 'cell_stack' | 'pack' | 'tray';
 }
 
 interface TruckVehicle {
@@ -111,6 +120,24 @@ const TRUCK_LENGTH = TRUCK_TRAILER_W + TRUCK_CAB_W;
 const TRUCK_DOCK_CLEARANCE = 12;
 /** How far outside its berth a truck spawns / drives to before it is culled. */
 const TRUCK_APPROACH_RUN = 420;
+
+/**
+ * Trims `text` with an ellipsis until it fits `maxWidth` at the context's
+ * current font. Measured rather than cut at a fixed character count, because
+ * "CY_14" and "BESS Module/Pack Stacking & Rigging" occupy very different room
+ * for the same number of characters.
+ */
+function elideToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(text.slice(0, mid) + '…').width <= maxWidth) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? text.slice(0, lo) + '…' : '';
+}
 
 /**
  * The x a truck body must rest at so its nose stops just short of `node`'s
@@ -257,6 +284,17 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const particlesRef = useRef<Particle[]>([]);
   const trucksRef = useRef<TruckVehicle[]>([]);
   const floatingTextsRef = useRef<FloatingText[]>([]);
+  const glyphKindCacheRef = useRef<Record<string, EquipmentKind>>({});
+
+  // Shared station positions: saved to Supabase on drop, applied over the
+  // generated layout on load, and pushed live to every other open browser.
+  const stationPositions = useStationPositions();
+  // Read inside buildFactoryModel without making it a dependency — the model
+  // must not be rebuilt (resetting every buffer's stock) just because a
+  // colleague nudged one station.
+  const savedPositionsRef = useRef(stationPositions.positions);
+  savedPositionsRef.current = stationPositions.positions;
+
 
   /**
    * Unlocking lets stations be dragged to new floor positions, so it goes
@@ -372,7 +410,10 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     addNode('C_Clean', 'Plasma Surface Cleaner', 'M', 1000, midY, 20, 0.1, 'z1', false, 'Cells');
     addNode('B02', 'Pre-Stack Cell Buffer', 'B', 1160, midY, 500, 1, 'z1', false, 'Cells');
 
-    // --- ZONE 2: MODULE STACKING & BANDING (Z2) ---
+    // --- ZONE 2: CELL STACKING & COMPRESSION (Z2) ---
+    // This is a cell-to-pack line: stacked prismatic cells are banded straight
+    // into a pack. There is no intermediate module, so nothing downstream of
+    // here carries module units — only cell stacks, and then packs.
     const stackCap = cellsPerPack * 2;
     const stackNodes = addParallelBlock(
       'S_BOT_',
@@ -388,23 +429,23 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       true,
       'Cells'
     );
-    addNode('S_Comp', 'Compress & Banding', 'M', 1560, midY, 4, 8, 'z2', false, 'Modules');
-    addNode('B03', 'Pre-Weld Module Buffer', 'B', 1720, midY, 25, 1, 'z2', false, 'Modules');
+    addNode('S_Comp', 'Stack Compression & Banding', 'M', 1560, midY, 4, 8, 'z2', false, 'Cell Stacks');
+    addNode('B03', 'Pre-Weld Cell Stack Buffer', 'B', 1720, midY, 25, 1, 'z2', false, 'Cell Stacks');
 
     // --- ZONE 3: CLEAN & DRY ROOM BUSBAR WELDING (Z3) ---
-    const clnNodes = addParallelBlock('W_CLN_', 'Pole Laser Cleaner', 'M', 1880, midY, tCln, 2, 15, 'z3', 95, false, 'Modules');
-    addNode('B_C1', 'Clean Buffer #1', 'B', 2000, midY, 10, 1, 'z3', false, 'Modules');
+    const clnNodes = addParallelBlock('W_CLN_', 'Cell Terminal Laser Cleaner', 'M', 1880, midY, tCln, 2, 15, 'z3', 95, false, 'Cell Stacks');
+    addNode('B_C1', 'Clean Buffer #1', 'B', 2000, midY, 10, 1, 'z3', false, 'Cell Stacks');
 
-    const fpcNodes = addParallelBlock('W_FPC_', 'Busbar Inserter', 'M', 2120, midY, tFpc, 2, 20, 'z3', 95, false, 'Modules');
-    addNode('B_C2', 'Clean Buffer #2', 'B', 2240, midY, 10, 1, 'z3', false, 'Modules');
+    const fpcNodes = addParallelBlock('W_FPC_', 'Busbar Inserter', 'M', 2120, midY, tFpc, 2, 20, 'z3', 95, false, 'Cell Stacks');
+    addNode('B_C2', 'Clean Buffer #2', 'B', 2240, midY, 10, 1, 'z3', false, 'Cell Stacks');
 
-    const weldNodes = addParallelBlock('W_L_', '3kW Laser Welder', 'M', 2360, midY, tWeld, 2, weldCycle, 'z3', 95, false, 'Modules');
-    addNode('B_C3', 'Clean Buffer #3', 'B', 2480, midY, 10, 1, 'z3', false, 'Modules');
+    const weldNodes = addParallelBlock('W_L_', '3kW Busbar Laser Welder', 'M', 2360, midY, tWeld, 2, weldCycle, 'z3', 95, false, 'Cell Stacks');
+    addNode('B_C3', 'Clean Buffer #3', 'B', 2480, midY, 10, 1, 'z3', false, 'Cell Stacks');
 
-    const ccdNodes = addParallelBlock('W_CCD_', 'Bead Inspection', 'M', 2600, midY, tCcd, 2, 10, 'z3', 95, false, 'Modules');
-    addNode('CCD_Sort', 'Bead Quality Gateway', 'M', 2720, midY, 10, 0.1, 'z3', false, 'Modules');
-    addNode('Q_Bead_Reject', 'Bead Reject Quarantine', 'B', 2720, midY + 130, 50, 0.1, 'z3', false, 'Modules');
-    addNode('B04', 'Module Buffer', 'B', 2860, midY, 30, 1, 'z3', false, 'Modules');
+    const ccdNodes = addParallelBlock('W_CCD_', 'Weld Bead Inspection', 'M', 2600, midY, tCcd, 2, 10, 'z3', 95, false, 'Cell Stacks');
+    addNode('CCD_Sort', 'Bead Quality Gateway', 'M', 2720, midY, 10, 0.1, 'z3', false, 'Cell Stacks');
+    addNode('Q_Bead_Reject', 'Bead Reject Quarantine', 'B', 2720, midY + 130, 50, 0.1, 'z3', false, 'Cell Stacks');
+    addNode('B04', 'Cell Stack Buffer', 'B', 2860, midY, 30, 1, 'z3', false, 'Cell Stacks');
 
     // --- ZONE 4: PACK MARRIAGE & ASSEMBLY (Z4 - Lower Serpentine Track) ---
     const lowerY = midY + 420;
@@ -534,13 +575,48 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     // Plant zones definition mapping
     plantZonesRef.current = {
       'Z1: CELL RECEIVING & OCV SORTING': ['W01', 'W02', 'B01', ...ocvNodes, 'C_Sort', 'Q_Bay', 'C_Clean', 'B02'],
-      'Z2: MODULE STACKING & BANDING': [...stackNodes, 'S_Comp', 'B03'],
+      'Z2: CELL STACKING & COMPRESSION': [...stackNodes, 'S_Comp', 'B03'],
       'Z3: CLEANROOM LASER BUSBAR WELDING': [...clnNodes, 'B_C1', ...fpcNodes, 'B_C2', ...weldNodes, 'B_C3', ...ccdNodes, 'CCD_Sort', 'Q_Bead_Reject', 'B04'],
       'Z4: PACK MARRIAGE & ASSEMBLY': ['W05_Mat_In', 'B_Mat', 'P01', 'P02', 'M01', 'M02', 'M03', 'M04', 'B05', 'E01'],
       'Z5: END-OF-LINE TESTING & QUALITY': ['B06', 'T01', 'T02', ...cyclerNodes, 'T_QG'],
       'Z8: PACKAGING & FINISHED STORE (4-DAY BUFFER)': ['W03_Out', 'W04_Out'],
       'Z_BESS: BESS CONTAINER & RACK INTEGRATION': ['B_BESS_Buf', 'BESS_Stack', 'BESS_Plate', 'BESS_Weld', 'BESS_BMS', 'BESS_Test', 'BESS_Gantry', 'W05_BESS'],
     };
+
+    // Caption width budget: the gap to the nearest station on the same row,
+    // less a small margin. A station standing alone keeps its full name; one in
+    // a dense block gets an elided one rather than colliding with its
+    // neighbours. `n.w` is the floor, so a caption is never narrower than the
+    // station it names.
+    const layoutIds = Object.keys(nodes);
+    for (const id of layoutIds) {
+      const n = nodes[id];
+      let nearest = 240;
+      for (const otherId of layoutIds) {
+        if (otherId === id) continue;
+        const o = nodes[otherId];
+        if (Math.abs(o.y - n.y) > 45) continue; // not on this row
+        const dx = Math.abs(o.x - n.x);
+        if (dx > 0) nearest = Math.min(nearest, dx);
+      }
+      n.labelWidth = Math.max(n.w, nearest - 10);
+    }
+
+    // Labels can change when the census changes, and the glyph is chosen from
+    // the label — so the classification cache is dropped with the old model.
+    glyphKindCacheRef.current = {};
+
+    // Lay the team's saved positions over the generated layout. Entries for
+    // stations this build did not produce are ignored rather than treated as an
+    // error — editing the machine census changes which stations exist, and a
+    // stale saved row must never be able to break the floor.
+    const saved = savedPositionsRef.current;
+    for (const id in saved) {
+      if (nodes[id]) {
+        nodes[id].x = saved[id].x;
+        nodes[id].y = saved[id].y;
+      }
+    }
 
     // Store in refs
     nodesRef.current = nodes;
@@ -591,6 +667,65 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   useEffect(() => {
     buildFactoryModel();
   }, [buildFactoryModel]);
+
+  // Positions arriving after the build — the first load finishing, or a
+  // colleague moving a station — are applied straight onto the live nodes.
+  // Rebuilding instead would reset every buffer's stock and restart the
+  // material flow, which is far too violent a response to one station moving.
+  useEffect(() => {
+    const nodes = nodesRef.current;
+    for (const id in stationPositions.positions) {
+      const node = nodes[id];
+      const saved = stationPositions.positions[id];
+      // Never yank a station out from under the operator mid-drag.
+      if (node && draggingNodeIdRef.current !== id) {
+        node.x = saved.x;
+        node.y = saved.y;
+      }
+    }
+  }, [stationPositions.positions]);
+
+  /**
+   * Commits a dragged station's new position for the whole team.
+   *
+   * The layout was already unlocked behind the password challenge, so the drag
+   * itself is not re-challenged — that would mean a prompt per nudge. If the
+   * save fails (migration 0004 not run, or the database unreachable) the
+   * station snaps back to where everyone else still sees it, rather than
+   * leaving this browser showing a move nobody received.
+   */
+  const commitStationMove = useCallback(
+    async (nodeId: string) => {
+      const node = nodesRef.current[nodeId];
+      if (!node) return;
+      const { x, y } = node;
+      const previous = savedPositionsRef.current[nodeId];
+      try {
+        await stationPositions.savePosition(nodeId, x, y, getRememberedEmail(), node.label);
+        floatingTextsRef.current.push({
+          text: `${node.label} moved — saved for everyone`,
+          x,
+          y: y - 35,
+          color: '#3B82F6',
+          life: 2.5,
+        });
+      } catch {
+        const live = nodesRef.current[nodeId];
+        if (live && previous) {
+          live.x = previous.x;
+          live.y = previous.y;
+        }
+        floatingTextsRef.current.push({
+          text: 'Could not save station position — move reverted',
+          x,
+          y: y - 35,
+          color: '#EF4444',
+          life: 3.5,
+        });
+      }
+    },
+    [stationPositions]
+  );
 
   // Canvas Mouse Pan, Zoom, and Node Dragging / Rearrangement Handling
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -687,14 +822,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           onSelectZone(node.zoneId);
         }
       } else {
-        // Station rearranged feedback
-        floatingTextsRef.current.push({
-          text: `Station ${nodeId} Repositioned`,
-          x: nodesRef.current[nodeId]?.x || 0,
-          y: (nodesRef.current[nodeId]?.y || 0) - 35,
-          color: '#3B82F6',
-          life: 2.0,
-        });
+        // Dropped after a real drag: commit the move for the whole team.
+        void commitStationMove(nodeId);
       }
       draggingNodeIdRef.current = null;
       hasDraggedNodeRef.current = false;
@@ -784,8 +913,29 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     return newCam;
   }, []);
 
-  // Reset Factory Floor Layout Positions
-  const handleResetLayout = () => {
+  /**
+   * Returns the floor to its generated blueprint. This discards the team's
+   * saved positions for everyone, not just this browser, so it is challenged
+   * and recorded like any other shared change.
+   */
+  const handleResetLayout = async () => {
+    const { authorised, actorEmail } = await requestEditAuthorization(
+      'Reset plant floor layout',
+      'Discards every saved station position, for all users'
+    );
+    if (!authorised) return;
+    try {
+      await stationPositions.resetAll(actorEmail);
+    } catch {
+      floatingTextsRef.current.push({
+        text: 'Could not clear saved positions — layout unchanged for others',
+        x: 1780,
+        y: 2525,
+        color: '#EF4444',
+        life: 3.5,
+      });
+      return;
+    }
     buildFactoryModel();
     floatingTextsRef.current.push({
       text: 'Floor Layout Reset to Default',
@@ -1044,9 +1194,9 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                 }
 
                 // Spawn particle
-                let pType: 'cell' | 'module' | 'pack' | 'tray' = 'cell';
+                let pType: 'cell' | 'cell_stack' | 'pack' | 'tray' = 'cell';
                 if (id.startsWith('S_BOT_') || id.startsWith('W_') || id === 'CCD_Sort' || id === 'B04') {
-                  pType = 'module';
+                  pType = 'cell_stack';
                 }
                 if (
                   id.startsWith('M0') ||
@@ -1129,6 +1279,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
       const isDark = theme === 'dark';
 
+      // Wall-clock seconds, used to phase the moving parts of the equipment
+      // glyphs. Each station is phased by its own cycle time, so a slow cycler
+      // visibly works more slowly than a fast stacking robot.
+      const nowSec = performance.now() / 1000;
+
       // Match canvas container dimensions
       const rect = canvas.parentNode ? (canvas.parentNode as HTMLElement).getBoundingClientRect() : null;
       if (rect) {
@@ -1174,7 +1329,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       // Draw Plant Zones Bounding Boxes
       const zoneColors: { [key: string]: string } = {
         'Z1: CELL RECEIVING & OCV SORTING': '59, 130, 246', // Blue
-        'Z2: MODULE STACKING & BANDING': '16, 185, 129', // Emerald
+        'Z2: CELL STACKING & COMPRESSION': '16, 185, 129', // Emerald
         'Z3: CLEANROOM LASER BUSBAR WELDING': '139, 92, 246', // Purple
         'Z4: PACK MARRIAGE & ASSEMBLY': '245, 158, 11', // Amber
         'Z5: END-OF-LINE TESTING & QUALITY': '239, 68, 68', // Red
@@ -1313,6 +1468,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           ctx.setLineDash([]);
         }
 
+        // The station's enclosure. The equipment itself is drawn inside it, so
+        // this is deliberately quiet — a machine housing, not the subject.
         ctx.fillStyle = isDark ? (isBuf ? '#1A1D24' : '#111318') : (isBuf ? '#F1F5F9' : '#FFFFFF');
 
         if (isDraggingThis) ctx.strokeStyle = '#3B82F6';
@@ -1327,38 +1484,85 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         ctx.fillRect(rx, ry, n.w, n.h);
         ctx.strokeRect(rx, ry, n.w, n.h);
 
-        // Node ID Header
-        ctx.fillStyle = isDraggingThis ? '#60A5FA' : isSelected ? (isDark ? '#60A5FA' : '#1D4ED8') : (isDark ? '#E5E7EB' : '#0F172A');
-        ctx.font = 'bold 11px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(id, n.x, ry + 14);
+        // The machine that actually stands here. Classification is memoised per
+        // station id: it parses the label, and re-deriving it for every station
+        // on every frame would be pure waste.
+        let kind = glyphKindCacheRef.current[id];
+        if (!kind) {
+          kind = classifyStation(id, n.label, n.type, n.unit);
+          glyphKindCacheRef.current[id] = kind;
+        }
 
-        // Capacity Meter Fill
+        // Only a working station gets a moving phase, so motion on the floor
+        // always means work rather than merely that the canvas is animating.
+        const phase = n.status === 'working' ? (nowSec / Math.max(0.6, n.processingTime)) % 1 : 0.25;
+
+        const statusAccent =
+          n.status === 'blocked'
+            ? '#EF4444'
+            : n.status === 'defect'
+            ? '#F97316'
+            : n.status === 'working'
+            ? '#10B981'
+            : n.status === 'holding'
+            ? '#F59E0B'
+            : isBuf
+            ? '#8B5CF6'
+            : isDark
+            ? '#64748B'
+            : '#94A3B8';
+
+        drawEquipmentGlyph(ctx, kind, n.x, n.y - 2, n.w * 0.82, {
+          stroke: isDark ? '#94A3B8' : '#475569',
+          body: isDark ? '#232833' : '#E2E8F0',
+          accent: statusAccent,
+          detail: isDark ? '#39404E' : '#CBD5E1',
+        }, phase);
+
+        // Capacity meter: a thin strip along the base of the enclosure, so it
+        // reads as a fill gauge without competing with the machine above it.
         const fillPct = Math.min(1, n.inventory / Math.max(1, n.cap));
-        ctx.fillStyle = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
-        ctx.fillRect(rx + 3, n.y + 4, n.w - 6, n.h / 2 - 6);
+        const meterH = 5;
+        const meterY = ry + n.h - meterH - 2;
+        ctx.fillStyle = isDark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)';
+        ctx.fillRect(rx + 3, meterY, n.w - 6, meterH);
 
         let meterColor = '#10B981';
         if (fillPct > 0.8) meterColor = '#EF4444';
         else if (fillPct > 0.5) meterColor = '#F59E0B';
 
         ctx.fillStyle = meterColor;
-        ctx.fillRect(rx + 3, n.y + 4, (n.w - 6) * fillPct, n.h / 2 - 6);
+        ctx.fillRect(rx + 3, meterY, (n.w - 6) * fillPct, meterH);
 
-        // Stock Number
-        ctx.fillStyle = isDark ? '#9CA3AF' : '#475569';
-        ctx.font = '9px monospace';
-        if (id === 'M01') {
-          ctx.fillText(`M:${n.inventory} | T:${n.auxInventory || 0}`, n.x, n.y + 14);
-        } else {
-          ctx.fillText(`${n.inventory}/${n.cap}`, n.x, n.y + 14);
-        }
+        // Identity and stock, below the enclosure where they no longer sit on
+        // top of the equipment.
+        ctx.textAlign = 'center';
+        ctx.fillStyle = isDraggingThis
+          ? '#60A5FA'
+          : isSelected
+          ? isDark
+            ? '#60A5FA'
+            : '#1D4ED8'
+          : isDark
+          ? '#E5E7EB'
+          : '#0F172A';
+        const budget = n.labelWidth ?? n.w * 1.6;
 
-        // Node Label below box
+        ctx.font = 'bold 10px sans-serif';
+        const stockText =
+          id === 'M01' ? `${n.inventory} + ${n.auxInventory || 0} trays` : `${n.inventory}/${n.cap}`;
+        // The id is what makes a station identifiable, so when there is not
+        // room for both it is the stock figure that goes, not the id.
+        const idLine = `${id}  ·  ${stockText}`;
+        ctx.fillText(
+          ctx.measureText(idLine).width <= budget ? idLine : elideToWidth(ctx, id, budget),
+          n.x,
+          ry + n.h + 13
+        );
+
         ctx.fillStyle = isDark ? '#94A3B8' : '#334155';
         ctx.font = '10px sans-serif';
-        const labelText = n.label.length > 22 ? n.label.substring(0, 20) + '..' : n.label;
-        ctx.fillText(labelText, n.x, ry + n.h + 14);
+        ctx.fillText(elideToWidth(ctx, n.label, budget), n.x, ry + n.h + 25);
 
         // If hovered or dragging, render position coordinate badge
         if (isDraggingThis || isHovered) {
@@ -1381,12 +1585,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       if (showParticles) {
         particlesRef.current.forEach(p => {
           ctx.beginPath();
-          ctx.arc(p.x, p.y, p.type === 'pack' ? 6 : p.type === 'module' ? 4.5 : 3.5, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, p.type === 'pack' ? 6 : p.type === 'cell_stack' ? 4.5 : 3.5, 0, Math.PI * 2);
 
           if (p.type === 'cell') {
             ctx.fillStyle = '#10B981';
             ctx.shadowColor = '#10B981';
-          } else if (p.type === 'module') {
+          } else if (p.type === 'cell_stack') {
             ctx.fillStyle = '#F59E0B';
             ctx.shadowColor = '#F59E0B';
           } else if (p.type === 'pack') {
@@ -1892,7 +2096,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Cell Stacker Cycle Time</span>
-                      <span className="font-mono text-amber-500 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">{stackerCycle}s / Module</span>
+                      <span className="font-mono text-amber-500 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">{stackerCycle}s / Stack</span>
                     </div>
                     <input
                       type="range"
@@ -1910,7 +2114,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   }`}>
                     <div className="flex justify-between items-center">
                       <span className={`font-medium ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>Laser Busbar Weld Cycle Time</span>
-                      <span className="font-mono text-blue-500 font-bold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">{weldCycle}s / Module</span>
+                      <span className="font-mono text-blue-500 font-bold bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">{weldCycle}s / Stack</span>
                     </div>
                     <input
                       type="range"
@@ -2098,7 +2302,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shadow-sm shadow-amber-500" />
-              <span>Modules</span>
+              <span>Cell Stacks</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-sm shadow-orange-500" />

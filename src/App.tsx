@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Header } from './components/Header';
 import { PlantLayout2D } from './components/PlantLayout2D';
 import { ThroughputDashboard } from './components/ThroughputDashboard';
@@ -8,6 +8,7 @@ import { MachineCensusList } from './components/MachineCensusList';
 import { WorkforcePayroll } from './components/WorkforcePayroll';
 import { TariffEnergyOptimization } from './components/TariffEnergyOptimization';
 import { CapExCostingModel } from './components/CapExCostingModel';
+import { ChangeLog } from './components/ChangeLog';
 import { AiOptimizerModal } from './components/AiOptimizerModal';
 import { ShiftReportModal } from './components/ShiftReportModal';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
@@ -68,20 +69,56 @@ export default function App() {
   const loadError =
     zonesApi.error || warehousesApi.error || workforceApi.error || tariffApi.error || capexApi.error;
 
-  // Every persisted write goes through the engineering password challenge.
-  // Wrapping here — at the single point each collection is handed to a screen —
-  // means a new CRUD surface cannot accidentally ship without the guard, and no
-  // screen needs to know the password exists. Reads stay open, so the twin is
-  // still fully viewable without authorising anything.
-  const warehouseWrites = guardCollection('warehouse', 'warehouses', warehousesApi);
-  const workforceWrites = guardCollection('workforce line', 'workforce', workforceApi);
-  const tariffWrites = guardCollection('tariff period', 'tariff_periods', tariffApi);
-  const capexWrites = guardCollection('CapEx item', 'capex_items', capexApi);
-  const machineWrites = guardCollection('machine', 'machines', {
-    insert: zonesApi.addMachine,
-    update: zonesApi.updateMachine,
-    remove: zonesApi.deleteMachine,
-  });
+  // Every persisted write goes through the engineering password challenge and
+  // lands in the change trail. Wrapping here — at the single point each
+  // collection is handed to a screen — means a new CRUD surface cannot
+  // accidentally ship without either, and no screen needs to know they exist.
+  // Reads stay open, so the twin is fully viewable without authorising anything.
+  //
+  // `rows` is supplied so an update can be diffed against the record as it
+  // stands, which is what lets the trail show "cycleTimeSec 90 → 74" rather
+  // than just "someone edited this".
+  const allMachines = useMemo(() => zonesApi.zones.flatMap(z => z.machines), [zonesApi.zones]);
+
+  const warehouseWrites = guardCollection(
+    { label: 'warehouse', entity: 'warehouses', rows: warehousesApi.rows, describe: w => w.name ?? '' },
+    warehousesApi
+  );
+  const workforceWrites = guardCollection(
+    {
+      label: 'workforce line',
+      entity: 'workforce',
+      rows: workforceApi.rows,
+      describe: w => [w.ref, w.zoneOrFunction].filter(Boolean).join(' · '),
+    },
+    workforceApi
+  );
+  const tariffWrites = guardCollection(
+    { label: 'tariff period', entity: 'tariff_periods', rows: tariffApi.rows, describe: t => t.name ?? '' },
+    tariffApi
+  );
+  const capexWrites = guardCollection(
+    {
+      label: 'CapEx item',
+      entity: 'capex_items',
+      rows: capexApi.rows,
+      describe: c => [c.code, c.category].filter(Boolean).join(' · '),
+    },
+    capexApi
+  );
+  const machineWrites = guardCollection(
+    {
+      label: 'machine',
+      entity: 'machines',
+      rows: allMachines,
+      describe: m => [m.wbsCode, m.name].filter(Boolean).join(' · '),
+    },
+    {
+      insert: zonesApi.addMachine,
+      update: zonesApi.updateMachine,
+      remove: zonesApi.deleteMachine,
+    }
+  );
 
   const [isAiModalOpen, setIsAiModalOpen] = useState<boolean>(false);
 
@@ -425,6 +462,8 @@ export default function App() {
                   onDeleteItem={capexWrites.remove}
                 />
               )}
+
+              {activeTab === 'changelog' && <ChangeLog theme={theme} />}
               </ErrorBoundary>
             </div>
           </div>

@@ -13,7 +13,8 @@ export type TabId =
   | 'mhe_personnel'
   | 'workforce'
   | 'tariff'
-  | 'capex';
+  | 'capex'
+  | 'changelog';
 
 export interface ProcessMachine {
   id: string;
