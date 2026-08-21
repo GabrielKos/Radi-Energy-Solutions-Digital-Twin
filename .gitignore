@@ -1,0 +1,25 @@
+node_modules/
+build/
+dist/
+coverage/
+*.log
+
+# Local environment. `.env.example` is the committed template.
+.env*
+!.env.example
+
+# Supabase CLI scratch
+supabase/.temp/
+
+# Local scratch: superseded zip snapshots kept outside version control
+_to_delete/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Vercel
+.vercel
