@@ -17,28 +17,52 @@ import { createClient } from '@supabase/supabase-js';
  * stripping it is always safe and always what the person meant. We strip, then
  * say in the console that we had to.
  */
-const stripWhitespace = (value: string | undefined): string => (value ?? '').replace(/\s+/g, '');
+const clean = (value: string | undefined): string =>
+  (value ?? '')
+    .replace(/\s+/g, '')
+    // A value pasted from a .env file or a shell sometimes brings its quotes.
+    .replace(/^["']+|["']+$/g, '');
 
 const rawUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const rawKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
-const url = stripWhitespace(rawUrl);
-const anonKey = stripWhitespace(rawKey);
+const url = clean(rawUrl);
+const anonKey = clean(rawKey);
 
-const urlHadWhitespace = Boolean(rawUrl) && rawUrl !== url;
-const keyHadWhitespace = Boolean(rawKey) && rawKey !== anonKey;
+const urlWasCleaned = Boolean(rawUrl) && rawUrl !== url;
+const keyWasCleaned = Boolean(rawKey) && rawKey !== anonKey;
 
 /** A Supabase project URL: https://<ref>.supabase.co */
 const looksLikeUrl = /^https?:\/\/[^/]+\.[^/]+/.test(url);
-/** A JWT: three base64url segments separated by dots. */
-const looksLikeJwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(anonKey);
 
 /**
- * False when this deployment cannot talk to Supabase. Consumers check it and
- * surface {@link SUPABASE_CONFIG_ERROR} instead of firing requests that cannot
- * succeed.
+ * Supabase has issued keys in more than one shape: the long `eyJ…` JWT, and the
+ * newer `sb_publishable_…` / `sb_secret_…` format. This recognises both — but it
+ * is used only to *warn*, never to block.
+ *
+ * Refusing to start on an unrecognised key shape would mean a future key format
+ * bricks the app for a reason that is entirely our own invention. Only the
+ * server can truly say whether a key is valid, so anything non-empty is passed
+ * through and the server's own answer is reported if it rejects it.
  */
-export const isSupabaseConfigured: boolean = Boolean(url && anonKey) && looksLikeUrl && looksLikeJwt;
+const looksLikeKnownKey =
+  /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(anonKey) || /^sb_[a-z]+_[A-Za-z0-9_-]+$/.test(anonKey);
+
+/**
+ * False only when this deployment *cannot* talk to Supabase — a missing value,
+ * or a URL that is not a URL. An unfamiliar key shape is not disqualifying.
+ */
+export const isSupabaseConfigured: boolean = Boolean(url && anonKey) && looksLikeUrl;
+
+/**
+ * A safe fingerprint of a value, for diagnosing a mis-paste without ever
+ * printing a credential: enough to spot truncation, a wrapping quote, or the
+ * wrong value entirely, and nothing more.
+ */
+const fingerprint = (value: string): string =>
+  value.length === 0
+    ? '(empty)'
+    : `${value.length} chars, starts "${value.slice(0, 6)}", ends "${value.slice(-4)}"`;
 
 const WHERE_TO_SET =
   'Set them in .env.local for local development, or in your hosting provider ' +
@@ -54,14 +78,8 @@ function describeProblem(): string {
   if (!looksLikeUrl) {
     return (
       'VITE_SUPABASE_URL does not look like a Supabase project URL. It should be ' +
-      'https://<your-project-ref>.supabase.co with no quotes and no trailing slash.'
-    );
-  }
-  if (!looksLikeJwt) {
-    return (
-      'VITE_SUPABASE_ANON_KEY does not look like a valid key. It should be one long ' +
-      'unbroken string beginning "eyJ" with exactly two dots and no spaces or quotes. ' +
-      'Re-copy it from Supabase → Project Settings → API → anon public, and paste it as a single line.'
+      'https://<your-project-ref>.supabase.co with no quotes and no trailing slash. ' +
+      `Received: ${fingerprint(url)}.`
     );
   }
   return '';
@@ -71,13 +89,23 @@ export const SUPABASE_CONFIG_ERROR = isSupabaseConfigured
   ? ''
   : `Supabase is not configured for this deployment. ${describeProblem()}`;
 
-if (urlHadWhitespace || keyHadWhitespace) {
-  const which = [urlHadWhitespace && 'VITE_SUPABASE_URL', keyHadWhitespace && 'VITE_SUPABASE_ANON_KEY']
+if (urlWasCleaned || keyWasCleaned) {
+  const which = [urlWasCleaned && 'VITE_SUPABASE_URL', keyWasCleaned && 'VITE_SUPABASE_ANON_KEY']
     .filter(Boolean)
     .join(' and ');
   console.warn(
-    `[supabase] Removed stray whitespace or a line break from ${which}. The app will work, ` +
+    `[supabase] Removed stray whitespace, line breaks or quotes from ${which}. The app will work, ` +
       'but tidy the value where it is set — a wrapped paste is the usual cause.'
+  );
+}
+
+if (isSupabaseConfigured && !looksLikeKnownKey) {
+  // Not fatal — the server decides — but almost always a mis-paste, so say so
+  // where a developer will see it, with enough detail to spot the problem.
+  console.warn(
+    '[supabase] VITE_SUPABASE_ANON_KEY is not in a shape this app recognises ' +
+      '(neither an "eyJ…" JWT nor an "sb_publishable_…" key). Proceeding anyway — if requests ' +
+      `fail, check the value. Received: ${fingerprint(anonKey)}.`
   );
 }
 
