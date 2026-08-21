@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured, SUPABASE_CONFIG_ERROR } from './supabaseClient';
 import { recordAudit } from './auditLog';
 
 /**
@@ -61,6 +61,12 @@ export function useStationPositions(): UseStationPositionsResult {
 
   useEffect(() => {
     let active = true;
+
+    if (!isSupabaseConfigured) {
+      setError(SUPABASE_CONFIG_ERROR);
+      setLoading(false);
+      return;
+    }
 
     (async () => {
       const { data, error: fetchError } = await supabase.from('station_positions').select('*');

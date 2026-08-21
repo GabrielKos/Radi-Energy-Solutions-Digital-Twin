@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured, SUPABASE_CONFIG_ERROR } from './supabaseClient';
 
 /**
  * The change trail.
@@ -64,6 +64,7 @@ export interface RecordAuditInput {
  * account of what happened.
  */
 export async function recordAudit(input: RecordAuditInput): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     const { error } = await supabase.from('audit_log').insert({
       actor_email: input.actorEmail,
@@ -159,6 +160,13 @@ export function useAuditTrail(): UseAuditTrailResult {
 
   useEffect(() => {
     let active = true;
+
+    if (!isSupabaseConfigured) {
+      setError(SUPABASE_CONFIG_ERROR);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     (async () => {

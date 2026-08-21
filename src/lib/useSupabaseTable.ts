@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured, SUPABASE_CONFIG_ERROR } from './supabaseClient';
 
 export interface TableAdapter<T extends { id: string }> {
   table: string;
@@ -38,6 +38,15 @@ export function useSupabaseTable<T extends { id: string }>(adapter: TableAdapter
 
   useEffect(() => {
     let active = true;
+
+    // Without credentials nothing can load. Say so once, plainly, instead of
+    // leaving every screen spinning behind a request that cannot succeed.
+    if (!isSupabaseConfigured) {
+      setError(SUPABASE_CONFIG_ERROR);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
 
     (async () => {
