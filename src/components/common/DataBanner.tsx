@@ -55,14 +55,26 @@ export const DataBanner: React.FC<DataBannerProps> = ({
   );
 
   if (loadError) {
+    // A configuration problem already explains itself precisely — which value
+    // is wrong, and where to correct it — so repeating a generic "check your
+    // .env.local" hint after it would only bury the specific answer. That hint
+    // was also wrong on a hosted deployment, which has no .env.local and no dev
+    // server to restart.
+    const isConfigProblem = loadError.startsWith('Supabase is not configured');
     return (
       <div className={shell('error')}>
         <AlertTriangle className="w-4 h-4 shrink-0" />
         <span>
-          <strong>Cannot reach the database.</strong> {loadError} — check{' '}
-          <code className="font-mono">VITE_SUPABASE_URL</code> and{' '}
-          <code className="font-mono">VITE_SUPABASE_ANON_KEY</code> in <code className="font-mono">.env.local</code>,
-          then restart the dev server.
+          <strong>{isConfigProblem ? 'Database not configured.' : 'Cannot reach the database.'}</strong>{' '}
+          {loadError}
+          {!isConfigProblem && (
+            <>
+              {' '}— check <code className="font-mono">VITE_SUPABASE_URL</code> and{' '}
+              <code className="font-mono">VITE_SUPABASE_ANON_KEY</code> where this deployment sets them
+              (<code className="font-mono">.env.local</code> locally, or your hosting provider's
+              environment variables followed by a redeploy).
+            </>
+          )}
         </span>
         {retryBtn('Retry')}
       </div>
