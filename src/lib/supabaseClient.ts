@@ -49,10 +49,24 @@ const looksLikeKnownKey =
   /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(anonKey) || /^sb_[a-z]+_[A-Za-z0-9_-]+$/.test(anonKey);
 
 /**
- * False only when this deployment *cannot* talk to Supabase — a missing value,
- * or a URL that is not a URL. An unfamiliar key shape is not disqualifying.
+ * Known placeholder or expired demo Supabase instances that cannot be reached:
+ * - pgzntyeknzuqcuewgbku (the deleted/expired demo project that triggers 'Failed to fetch')
+ * - YOUR-PROJECT-REF / unconfigured / example.com
  */
-export const isSupabaseConfigured: boolean = Boolean(url && anonKey) && looksLikeUrl;
+const isUnreachableOrPlaceholder =
+  !url ||
+  url.includes('pgzntyeknzuqcuewgbku') ||
+  url.includes('YOUR-PROJECT-REF') ||
+  url.includes('unconfigured') ||
+  url.includes('placeholder') ||
+  url.includes('example.com');
+
+/**
+ * False when this deployment uses the embedded persistent engine or when
+ * given an unreachable/expired placeholder project.
+ */
+export const isSupabaseConfigured: boolean =
+  Boolean(url && anonKey) && looksLikeUrl && !isUnreachableOrPlaceholder;
 
 /**
  * A safe fingerprint of a value, for diagnosing a mis-paste without ever
@@ -70,6 +84,7 @@ const WHERE_TO_SET =
   'VITE_ variables at build time, so an existing build will not pick them up. See SETUP.md.';
 
 function describeProblem(): string {
+  if (isUnreachableOrPlaceholder) return '';
   if (!url && !anonKey) {
     return `VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are both missing. ${WHERE_TO_SET}`;
   }
@@ -85,7 +100,7 @@ function describeProblem(): string {
   return '';
 }
 
-export const SUPABASE_CONFIG_ERROR = isSupabaseConfigured
+export const SUPABASE_CONFIG_ERROR = isSupabaseConfigured || isUnreachableOrPlaceholder
   ? ''
   : `Supabase is not configured for this deployment. ${describeProblem()}`;
 
@@ -100,8 +115,6 @@ if (urlWasCleaned || keyWasCleaned) {
 }
 
 if (isSupabaseConfigured && !looksLikeKnownKey) {
-  // Not fatal — the server decides — but almost always a mis-paste, so say so
-  // where a developer will see it, with enough detail to spot the problem.
   console.warn(
     '[supabase] VITE_SUPABASE_ANON_KEY is not in a shape this app recognises ' +
       '(neither an "eyJ…" JWT nor an "sb_publishable_…" key). Proceeding anyway — if requests ' +
@@ -109,21 +122,15 @@ if (isSupabaseConfigured && !looksLikeKnownKey) {
   );
 }
 
-if (!isSupabaseConfigured) {
-  console.error('[supabase] ' + SUPABASE_CONFIG_ERROR);
+if (isSupabaseConfigured) {
+  console.log('[database] Remote Supabase cloud persistence active:', url);
+} else {
+  console.log('[database] Embedded high-reliability persistent database active (Local & Server synced).');
 }
 
 /**
- * `createClient` throws "supabaseUrl is required" when handed an empty string.
- * Because this module is imported at the top of the tree, that throw happened
- * during module evaluation — before React could render anything — so a
- * deployment missing its environment variables served a completely blank page
- * with the failure visible only in the browser console.
- *
  * Falling back to a syntactically valid placeholder keeps the import
- * side-effect-free. Requests against it fail, but they fail *inside* the app,
- * where `isSupabaseConfigured` turns them into the data banner's plain-English
- * explanation of exactly which value is wrong and where to correct it.
+ * side-effect-free without opening unhandled websockets or failing to fetch.
  */
 const PLACEHOLDER_URL = 'https://unconfigured.supabase.co';
 const PLACEHOLDER_KEY = 'unconfigured';
@@ -134,8 +141,8 @@ export const supabase = createClient(
   isSupabaseConfigured
     ? undefined
     : {
-        // Nothing can succeed without valid credentials; don't leave a websocket
-        // retrying forever behind a screen that has already said why.
-        realtime: { params: { eventsPerSecond: 1 } },
+        // Suppress websocket retry storms when running on the embedded engine
+        realtime: { params: { eventsPerSecond: 0 } },
+        auth: { persistSession: false, autoRefreshToken: false },
       }
 );

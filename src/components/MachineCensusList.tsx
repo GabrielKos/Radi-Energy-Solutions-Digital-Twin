@@ -37,6 +37,15 @@ const STATUS_OPTIONS = [
   { value: 'maintenance', label: 'Maintenance' },
 ];
 
+const UNIT_OPTIONS = [
+  { value: 'Cells', label: 'Cells (Raw / Sorted / Cleaned)' },
+  { value: 'Cell Stacks', label: 'Cell Stacks (Grouped / 2K Chemical Bonded / Welded)' },
+  { value: 'Packs', label: 'Packs (Married / Sealed / Tested)' },
+  { value: 'Trays', label: 'Trays & Structural Hardware' },
+  { value: 'Racks', label: 'BESS Racks & Manifolds' },
+  { value: 'Containers', label: 'BESS Utility Containers' },
+];
+
 const emptyMachineForm = (zoneId: string, taktSec: number) => ({
   zoneId,
   wbsCode: '',
@@ -45,6 +54,9 @@ const emptyMachineForm = (zoneId: string, taktSec: number) => ({
   cycleTimeSec: 30,
   machinesCount: defensibleMachineCount(30, 1, taktSec),
   packsPerCycle: 1,
+  precedingStationId: 'auto',
+  succeedingStationId: 'auto',
+  unit: 'Cell Stacks',
   unitRateUSD: 0,
   status: 'running',
   utilizationPct: 90,
@@ -75,6 +87,50 @@ export const MachineCensusList: React.FC<MachineCensusListProps> = ({
 
   const zoneOptions: CrudField['options'] = zones.map(z => ({ value: z.id, label: `${z.wbsCode} — ${z.name}` }));
 
+  // Floor Buffers & Warehouses available for direct sequence linkages
+  const LINE_BUFFERS_AND_DOCKS: CrudField['options'] = [
+    { value: 'W01', label: '📦 W01 — WH-1 Inbound Cell Dock' },
+    { value: 'B01', label: '📦 B01 — Cell Storage Buffer (Pre-OCV)' },
+    { value: 'Q_Bay', label: '⚠️ Q_Bay — Defect Cell Reject Bay' },
+    { value: 'B02', label: '📦 B02 — Pre-Stack Cell Buffer' },
+    { value: 'B03', label: '📦 B03 — Pre-Weld Cell Stack Buffer' },
+    { value: 'B_C1', label: '📦 B_C1 — Clean Buffer #1 (Pre-Busbar)' },
+    { value: 'B_C2', label: '📦 B_C2 — Clean Buffer #2 (Pre-Laser Weld)' },
+    { value: 'B_C3', label: '📦 B_C3 — Clean Buffer #3 (Pre-CCD Vision)' },
+    { value: 'Q_Bead_Reject', label: '⚠️ Q_Bead_Reject — Bead Reject Quarantine' },
+    { value: 'B04', label: '📦 B04 — Cell Stack Buffer (Pre-Marriage)' },
+    { value: 'W05_Mat_In', label: '📦 W05_Mat_In — WH-4 Material Delivery Dock' },
+    { value: 'B_Mat', label: '📦 B_Mat — WH-4 Non-Live Component Store' },
+    { value: 'B05', label: '📦 B05 — Pre-Seal Pack Buffer' },
+    { value: 'B06', label: '📦 B06 — EOL Test Buffer' },
+    { value: 'T_QG', label: '🏁 T_QG — Final Quality Gate (QG)' },
+    { value: 'W03_Out', label: '📦 W03_Out — WH-2 Pack Racking Store (4-Day Buffer)' },
+    { value: 'W04_Out', label: '🚛 W04_Out — WH-2 Outbound Dispatch Dock' },
+    { value: 'B_BESS_Buf', label: '📦 B_BESS_Buf — BESS Pack Buffer Bank (Min. 20 Packs)' },
+    { value: 'W05_BESS', label: '🏗️ W05_BESS — WH-3 BESS Container Staging Yard' },
+  ];
+
+  const activeZone = zones.find(z => z.id === formValues.zoneId) || zones[0];
+  const stationLinkOptions: CrudField['options'] = [
+    { value: 'auto', label: '⚡ Auto (Sequence naturally in Zone line flow)' },
+    // Group active zone machines at the top
+    ...(activeZone
+      ? activeZone.machines
+          .filter(m => m.id !== editingId)
+          .map(m => ({ value: m.id, label: `⚙️ ${m.wbsCode} — ${m.name} (${activeZone.wbsCode})` }))
+      : []),
+    // All Line Buffers & Inbound/Outbound Storage Docks
+    ...LINE_BUFFERS_AND_DOCKS,
+    // Other zone machines for cross-zone integration
+    ...zones
+      .filter(z => z.id !== (activeZone?.id))
+      .flatMap(z =>
+        z.machines
+          .filter(m => m.id !== editingId)
+          .map(m => ({ value: m.id, label: `⚙️ ${m.wbsCode} — ${m.name} (${z.wbsCode})` }))
+      ),
+  ];
+
   const openAdd = () => {
     setFormMode('add');
     setEditingId(null);
@@ -95,6 +151,9 @@ export const MachineCensusList: React.FC<MachineCensusListProps> = ({
       cycleTimeSec: m.cycleTimeSec,
       machinesCount: m.machinesCount,
       packsPerCycle: m.packsPerCycle ?? 1,
+      precedingStationId: m.precedingStationId ?? 'auto',
+      succeedingStationId: m.succeedingStationId ?? 'auto',
+      unit: m.unit ?? (zone?.wbsCode === 'Z1' ? 'Cells' : zone?.wbsCode === 'Z4' || zone?.wbsCode === 'Z5' ? 'Packs' : 'Cell Stacks'),
       unitRateUSD: m.unitRateUSD,
       status: m.status,
       utilizationPct: m.utilizationPct,
@@ -205,6 +264,28 @@ export const MachineCensusList: React.FC<MachineCensusListProps> = ({
     },
     { key: 'status', label: 'Status', type: 'select', options: STATUS_OPTIONS },
     { key: 'utilizationPct', label: 'Utilization', type: 'number', min: 0, max: 100, suffix: '%', required: true },
+    {
+      key: 'unit',
+      label: 'Flow Item Unit Type',
+      type: 'select',
+      options: UNIT_OPTIONS,
+      required: true,
+      helpText: 'Determines the visual rendering and material type carried through this machine on the Floor Twin.',
+    },
+    {
+      key: 'precedingStationId',
+      label: 'Preceding Station / Feeder',
+      type: 'select',
+      options: stationLinkOptions,
+      helpText: 'The upstream station supplying parts into this machine on the digital twin canvas.',
+    },
+    {
+      key: 'succeedingStationId',
+      label: 'Succeeding Station / Receiver',
+      type: 'select',
+      options: stationLinkOptions,
+      helpText: 'The downstream station receiving processed parts from this machine on the digital twin canvas.',
+    },
   ];
 
   const formValuesWithPreview = {

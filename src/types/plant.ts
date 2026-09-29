@@ -36,6 +36,12 @@ export interface ProcessMachine {
    * contribution, which is what made the census unusable as a takt source.
    */
   packsPerCycle?: number;
+  /** Preceding station / machine on floor line (used for routing material flow and floor layout sequence) */
+  precedingStationId?: string;
+  /** Succeeding station / machine on floor line (used for routing material flow and floor layout sequence) */
+  succeedingStationId?: string;
+  /** Unit of flow (e.g. Cells, Cell Stacks, Packs, Trays, Racks, Containers) */
+  unit?: string;
 }
 
 export interface ProcessZone {
@@ -166,6 +172,12 @@ export interface SimulationState {
   shiftCompleted: boolean;
   isShiftReportOpen: boolean;
   bessContainersBuilt: number;
+
+  // Priming Mode & Dynamic Lead Time
+  isPrimed?: boolean; // If true, line operates at continuous steady-state cadence; if false, runs cold-start priming fill
+  primingModeActive?: boolean; // Whether active cold-start priming animation/process is engaged
+  primingLeadTimeSec?: number; // Dynamic critical path duration (seconds) based on active machine physics
+  primingProgressPct?: number; // 0 to 100% priming progression
 
   // 4-Day Buffer & Daily Production Log
   day1PacksProduced: number;

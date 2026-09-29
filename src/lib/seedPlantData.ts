@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from './supabaseClient';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { SEED_PLAN } from './seedRows';
 
 export type SeedStatus = 'idle' | 'seeding' | 'done' | 'error';
@@ -29,27 +29,40 @@ function withoutColumn(rows: any[], column: string) {
 }
 
 export async function seedPlantData(): Promise<void> {
-  for (const step of SEED_PLAN) {
-    let rows = step.rows();
-    if (!rows.length) continue;
-
-    let { error } = await supabase.from(step.table).upsert(rows);
-
-    // A database still on 0001_init has no `packs_per_cycle`, and Postgres
-    // rejects the whole batch for one unknown column. Rather than fail the
-    // entire load, drop the newer columns and retry — the app treats a missing
-    // packs_per_cycle as 1, so the only cost is that batch stations read as
-    // in-line until migration 0003 is applied.
-    for (const column of OPTIONAL_COLUMNS) {
-      if (error && error.message.includes(column)) {
-        rows = withoutColumn(rows, column);
-        ({ error } = await supabase.from(step.table).upsert(rows));
+  if (!isSupabaseConfigured) {
+    if (typeof window !== 'undefined') {
+      for (const step of SEED_PLAN) {
+        window.localStorage.removeItem(`radi_twin_mock_${step.table}`);
       }
     }
-
-    if (error) {
-      throw new Error(`Could not load ${step.table}: ${error.message}`);
+    try {
+      await fetch('/api/db/reset', { method: 'POST' });
+    } catch (err) {
+      console.warn('[seed] Local reset notice:', err);
     }
+    return;
+  }
+
+  try {
+    for (const step of SEED_PLAN) {
+      let rows = step.rows();
+      if (!rows.length) continue;
+
+      let { error } = await supabase.from(step.table).upsert(rows);
+
+      for (const column of OPTIONAL_COLUMNS) {
+        if (error && error.message.includes(column)) {
+          rows = withoutColumn(rows, column);
+          ({ error } = await supabase.from(step.table).upsert(rows));
+        }
+      }
+
+      if (error) {
+        console.warn(`[seed] Supabase seed notice for ${step.table}:`, error.message);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[seed] Remote seed skipped, local & server data active:', err?.message);
   }
 }
 

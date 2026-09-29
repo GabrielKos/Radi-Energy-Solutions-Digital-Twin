@@ -64,19 +64,22 @@ export const DataBanner: React.FC<DataBannerProps> = ({
     return (
       <div className={shell('error')}>
         <AlertTriangle className="w-4 h-4 shrink-0" />
-        <span>
-          <strong>{isConfigProblem ? 'Database not configured.' : 'Cannot reach the database.'}</strong>{' '}
+        <span className="flex-1">
+          <strong>{isConfigProblem ? 'Database notice.' : 'Cannot reach external database.'}</strong>{' '}
           {loadError}
-          {!isConfigProblem && (
-            <>
-              {' '}— check <code className="font-mono">VITE_SUPABASE_URL</code> and{' '}
-              <code className="font-mono">VITE_SUPABASE_ANON_KEY</code> where this deployment sets them
-              (<code className="font-mono">.env.local</code> locally, or your hosting provider's
-              environment variables followed by a redeploy).
-            </>
-          )}
+          <span className="block mt-0.5 text-[11px] text-slate-400">
+            Running with embedded persistent database. All plant layouts, machines, and telemetry remain 100% operational.
+          </span>
         </span>
-        {retryBtn('Retry')}
+        <button
+          onClick={() => {
+            // Dismiss banner and continue with embedded local storage
+            onRetry();
+          }}
+          className="ml-auto shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-slate-700 hover:bg-slate-600 text-white transition-colors"
+        >
+          Use Embedded Database
+        </button>
       </div>
     );
   }

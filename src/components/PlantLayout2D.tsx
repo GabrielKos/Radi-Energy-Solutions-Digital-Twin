@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProcessZone, WarehouseInfo, SimulationState, MheItem, ThemeMode } from '../types/plant';
 import { requestEditAuthorization, getRememberedEmail } from '../lib/editAuth';
 import { useStationPositions } from '../lib/stationPositions';
@@ -68,14 +68,22 @@ interface CanvasNode {
   isTransformer?: boolean;
   unit: string;
   zoneId: string;
-  /**
-   * Horizontal room this station's caption has before it would run into the
-   * neighbour on the same row. Computed once per layout build — the 40-cycler
-   * comb sits on an 80px pitch, so without a budget every caption there
-   * overlapped the two beside it into an unreadable smear.
-   */
   labelWidth?: number;
+  cycleCount: number;
+  targetRoute?: string | null;
 }
+
+const formatShiftTime = (seconds: number) => {
+  const startHour = 6;
+  const totalMinutes = Math.floor(seconds / 60);
+  const hrs = startHour + Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
+  const secs = Math.floor(seconds % 60);
+  const hh = String(hrs).padStart(2, '0');
+  const mm = String(mins).padStart(2, '0');
+  const ss = String(secs).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
+};
 
 interface Particle {
   startX: number;
@@ -127,16 +135,42 @@ const TRUCK_APPROACH_RUN = 420;
  * "CY_14" and "BESS Module/Pack Stacking & Rigging" occupy very different room
  * for the same number of characters.
  */
+const elideCache: Record<string, string> = {};
+const textWidthCache: Record<string, number> = {};
+
+function getCachedTextWidth(ctx: CanvasRenderingContext2D, text: string, font: string): number {
+  const key = `${font}:${text}`;
+  const hit = textWidthCache[key];
+  if (hit !== undefined) return hit;
+  const w = ctx.measureText(text).width;
+  if (Object.keys(textWidthCache).length < 2500) {
+    textWidthCache[key] = w;
+  }
+  return w;
+}
+
 function elideToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
-  if (ctx.measureText(text).width <= maxWidth) return text;
+  const font = ctx.font;
+  const cacheKey = `${font}:${Math.round(maxWidth)}:${text}`;
+  const hit = elideCache[cacheKey];
+  if (hit !== undefined) return hit;
+
+  if (getCachedTextWidth(ctx, text, font) <= maxWidth) {
+    elideCache[cacheKey] = text;
+    return text;
+  }
   let lo = 0;
   let hi = text.length;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
-    if (ctx.measureText(text.slice(0, mid) + '…').width <= maxWidth) lo = mid;
+    if (getCachedTextWidth(ctx, text.slice(0, mid) + '…', font) <= maxWidth) lo = mid;
     else hi = mid - 1;
   }
-  return lo > 0 ? text.slice(0, lo) + '…' : '';
+  const result = lo > 0 ? text.slice(0, lo) + '…' : '';
+  if (Object.keys(elideCache).length < 2500) {
+    elideCache[cacheKey] = result;
+  }
+  return result;
 }
 
 /**
@@ -185,21 +219,26 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const [isHudExpanded, setIsHudExpanded] = useState<boolean>(() => {
     return typeof window !== 'undefined' ? window.innerWidth >= 768 : false;
   });
+  const [isPipelineHudExpanded, setIsPipelineHudExpanded] = useState<boolean>(() => {
+    return typeof window !== 'undefined' ? window.innerWidth >= 1024 : false;
+  });
 
   // Selected Node / Zone Inspector
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-  // View Camera State (Pan & Zoom) - Centered Default around (1780, 2625)
+  // View Camera State (Pan & Zoom) - Centered Default around (1900, 1050)
   const [camera, setCamera] = useState<{ x: number; y: number; scale: number }>(() => {
     const w = typeof window !== 'undefined' ? window.innerWidth : 1400;
     const h = typeof window !== 'undefined' ? window.innerHeight - 140 : 800;
-    const scale = Math.min(Math.max(Math.min((w - 40) / 3400, (h - 40) / 1350), 0.18), 0.52);
+    const scale = Math.min(Math.max(Math.min((w - 40) / 3900, (h - 40) / 1500), 0.18), 0.52);
     return {
-      x: Math.round(w / 2 - 1780 * scale),
-      y: Math.round(h / 2 - 2625 * scale),
+      x: Math.round(w / 2 - 1900 * scale),
+      y: Math.round(h / 2 - 1050 * scale),
       scale,
     };
   });
+  const cameraRef = useRef(camera);
+  cameraRef.current = camera;
   const hasInitializedCameraRef = useRef<boolean>(false);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -274,9 +313,25 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const tCcd = Math.max(1, Math.ceil(10 / requiredLineTakt));
   const tCycler = Math.max(1, Math.ceil(cyclerCycle / requiredLineTakt));
 
+  // Dynamic Pipeline Priming Lead Time (Physical transit across all 8 zones)
+  const dynamicPrimingTimeSec = useMemo(() => {
+    const z1Transit = 45; // Inbound AGVs & Depalletizing
+    const z2Transit = 60; // OCV/IR, Hi-Pot, EIS, Plasma Cleaning
+    const z3Transit = Math.round((stackerCycle * Math.ceil(cellsPerPack / 48)) / Math.max(1, tStack) + 75);
+    const z4Transit = Math.round(15 + 20 + (weldCycle * 2) / Math.max(1, tWeld) + 12);
+    const z5Transit = 45 + 15 + 40 + 50; // Tray Prep, TIM, Marriage M01, Fastening
+    const z6Transit = 30 + 40 + 35 + 45; // BMS Install, HV Cabling, BMS Test, Gasket Dispense, Cover Torque
+    const z7Transit = Math.round(30 + 25 + (cyclerCycle / Math.max(1, tCycler)) + 30); // Leak, Hipot, EOL Cycler, Quality Gate
+    const z8Transit = 30; // Transfer to finished racking
+    return Math.max(300, z1Transit + z2Transit + z3Transit + z4Transit + z5Transit + z6Transit + z7Transit + z8Transit);
+  }, [stackerCycle, weldCycle, cyclerCycle, cellsPerPack, tStack, tWeld, tCycler]);
+
   // Factory Dimensions
-  const FACTORY_W = 3600;
-  const FACTORY_H = Math.max(1800, 450 + Math.max(tStack, tWeld, tCycler) * 110);
+  const FACTORY_W = 4000;
+  const FACTORY_H = Math.max(1900, 500 + Math.max(tStack, tWeld, tCycler) * 110);
+
+  // Line Priming Mode State (Steady-State 26.7s Cadence vs Cold-Start Priming)
+  const isLinePrimedState = simState.isPrimed ?? true;
 
   // Refs for Animation Loop State
   const nodesRef = useRef<{ [key: string]: CanvasNode }>({});
@@ -305,16 +360,16 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   const toggleLayoutLock = useCallback(async () => {
     const wasLocked = isLayoutLocked;
     if (wasLocked) {
-      const authorised = await requestEditAuthorization(
+      const authResult = await requestEditAuthorization(
         'Unlock plant floor layout',
-        'Allows stations to be dragged to new positions'
+        'Allows stations to be dragged and repositioned on the digital twin canvas'
       );
-      if (!authorised) return;
+      if (!authResult.authorised) return;
     }
     setIsLayoutLocked(!wasLocked);
     floatingTextsRef.current.push({
       text: wasLocked ? '🔓 Edit Mode: Drag Stations to Move' : '🔒 Layout Locked (Accidental Moves Blocked)',
-      x: 1800,
+      x: 1900,
       y: FACTORY_H / 2 - 100,
       color: wasLocked ? '#F59E0B' : '#10B981',
       life: 2.5,
@@ -327,9 +382,10 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
   // Timers for logistics arrivals
   const inboundTimerRef = useRef<number>(5);
   const materialTimerRef = useRef<number>(10);
+  const outboundTimerRef = useRef<number>(15);
 
   // Build / Re-provision Factory Model Function
-  const buildFactoryModel = useCallback(() => {
+  const buildFactoryModel = useCallback((forcePrimed?: boolean) => {
     const nodes: { [key: string]: CanvasNode } = {};
     const links: { from: string; to: string }[] = [];
 
@@ -362,6 +418,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         isTransformer,
         unit,
         zoneId,
+        cycleCount: 0,
+        targetRoute: null,
       };
     };
 
@@ -397,86 +455,100 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       return ids;
     };
 
-    const midY = FACTORY_H / 2 - 220;
+    const midY = 560;
+    const lowerY = 1000;
+    const bessY = 1420;
 
-    // --- ZONE 1: CELL WAREHOUSE & INBOUND OCV (Z1) ---
+    // --- ZONE 1: CELL RECEIVING, BARCODE & INBOUND HANDLING (Z1) ---
     addNode('W01', 'WH-1 Inbound Cell Dock', 'IO', 120, midY, 150000, 0.01, 'z1', false, 'Cells');
-    addNode('W02', 'Cell Depalletizer Robot', 'M', 280, midY, 200, 0.01, 'z1', false, 'Cells');
-    addNode('B01', 'Cell Storage Buffer', 'B', 440, midY, 10000, 0.01, 'z1', false, 'Cells');
+    addNode('C.1.1.1', 'AGVs, Cell Tray Transfer', 'M', 260, midY, 100, 12, 'z1', false, 'Cells');
+    addNode('C.1.1.2', 'Cell Depalletizer Robot', 'M', 400, midY, 50, 24, 'z1', false, 'Cells');
+    addNode('C.1.1.3', 'Barcode & MES Registration', 'M', 540, midY, 50, 24, 'z1', false, 'Cells');
+    addNode('C.1.1.4', 'Kitting & Sequencing Benches', 'M', 680, midY, 50, 26, 'z1', false, 'Cells');
+    addNode('B01', 'Cell Storage Buffer', 'B', 820, midY, 10000, 0.01, 'z1', false, 'Cells');
 
-    const ocvNodes = addParallelBlock('OCV_', 'Cell OCV Tester', 'M', 640, midY, tOCV, 1, 0.1, 'z1', 80, false, 'Cells');
-    addNode('C_Sort', 'OCV Sort Gateway', 'M', 840, midY, 20, 0.1, 'z1', false, 'Cells');
-    addNode('Q_Bay', 'Defect Cell Reject Bay', 'B', 840, midY + 130, 100, 0.1, 'z1', false, 'Cells');
-    addNode('C_Clean', 'Plasma Surface Cleaner', 'M', 1000, midY, 20, 0.1, 'z1', false, 'Cells');
-    addNode('B02', 'Pre-Stack Cell Buffer', 'B', 1160, midY, 500, 1, 'z1', false, 'Cells');
+    // --- ZONE 2: CELL CONDITIONING, GRADING & SORTING (Z2) ---
+    const ocvNodes = addParallelBlock('OCV_', 'Cell OCV Tester', 'M', 980, midY, tOCV, 1, 0.1, 'z2', 80, false, 'Cells');
+    addNode('C_Sort', 'OCV Sort Gateway', 'M', 1140, midY, 20, 0.1, 'z2', false, 'Cells');
+    addNode('Q_Bay', 'Defect Cell Reject Bay', 'B', 1140, midY + 140, 500, 0.1, 'z2', false, 'Cells');
+    addNode('C.1.2.2', 'Hi-Pot & Leakage Test', 'M', 1280, midY, 20, 25, 'z2', false, 'Cells');
+    addNode('C.1.2.3', 'EIS Characterisation', 'M', 1420, midY, 20, 24, 'z2', false, 'Cells');
+    addNode('C_Clean', 'Cell Surface Plasma Cleaner', 'M', 1560, midY, 20, 24, 'z2', false, 'Cells');
+    addNode('B02', 'Pre-Stack Cell Buffer', 'B', 1700, midY, 1000, 1, 'z2', false, 'Cells');
 
-    // --- ZONE 2: CELL STACKING & COMPRESSION (Z2) ---
-    // This is a cell-to-pack line: stacked prismatic cells are banded straight
-    // into a pack. There is no intermediate module, so nothing downstream of
-    // here carries module units — only cell stacks, and then packs.
+    // --- ZONE 3: CELL STACKING, 2K ADHESIVE (AMBIENT CHEMICAL CURE) & COMPRESSION (Z3) ---
     const stackCap = cellsPerPack * 2;
     const stackNodes = addParallelBlock(
       'S_BOT_',
       'Stacker Robot',
       'M',
-      1360,
+      1860,
       midY,
       tStack,
       stackCap,
       stackerCycle,
-      'z2',
+      'z3',
       90,
       true,
       'Cells'
     );
-    addNode('S_Comp', 'Stack Compression & Banding', 'M', 1560, midY, 4, 8, 'z2', false, 'Cell Stacks');
-    addNode('B03', 'Pre-Weld Cell Stack Buffer', 'B', 1720, midY, 25, 1, 'z2', false, 'Cell Stacks');
+    addNode('S_Adhesive', '2K Cell Structural Adhesive (Chemical Cure)', 'M', 2020, midY, 4, 18, 'z3', false, 'Cell Stacks');
+    addNode('S_Comp', 'Stack Compression & Banding (30kN)', 'M', 2160, midY, 4, 8, 'z3', false, 'Cell Stacks');
+    addNode('C.1.3.4', 'Stack Pressure Test Gauge', 'M', 2300, midY, 4, 12, 'z3', false, 'Cell Stacks');
+    addNode('C.1.3.5', 'Fire Retardant Application', 'M', 2440, midY, 4, 24, 'z3', false, 'Cell Stacks');
+    addNode('B03', 'Pre-Weld Cell Stack Buffer', 'B', 2580, midY, 50, 1, 'z3', false, 'Cell Stacks');
 
-    // --- ZONE 3: CLEAN & DRY ROOM BUSBAR WELDING (Z3) ---
-    const clnNodes = addParallelBlock('W_CLN_', 'Cell Terminal Laser Cleaner', 'M', 1880, midY, tCln, 2, 15, 'z3', 95, false, 'Cell Stacks');
-    addNode('B_C1', 'Clean Buffer #1', 'B', 2000, midY, 10, 1, 'z3', false, 'Cell Stacks');
+    // --- ZONE 4: CLEAN & DRY ROOM LASER BUSBAR WELDING (Z4) ---
+    const clnNodes = addParallelBlock('W_CLN_', 'Cell Terminal Laser Cleaner', 'M', 2720, midY, tCln, 2, 15, 'z4', 95, false, 'Cell Stacks');
+    addNode('B_C1', 'Clean Buffer #1', 'B', 2840, midY, 20, 1, 'z4', false, 'Cell Stacks');
 
-    const fpcNodes = addParallelBlock('W_FPC_', 'Busbar Inserter', 'M', 2120, midY, tFpc, 2, 20, 'z3', 95, false, 'Cell Stacks');
-    addNode('B_C2', 'Clean Buffer #2', 'B', 2240, midY, 10, 1, 'z3', false, 'Cell Stacks');
+    const fpcNodes = addParallelBlock('W_FPC_', 'Busbar Inserter', 'M', 2980, midY, tFpc, 2, 20, 'z4', 95, false, 'Cell Stacks');
+    addNode('B_C2', 'Clean Buffer #2', 'B', 3100, midY, 20, 1, 'z4', false, 'Cell Stacks');
 
-    const weldNodes = addParallelBlock('W_L_', '3kW Busbar Laser Welder', 'M', 2360, midY, tWeld, 2, weldCycle, 'z3', 95, false, 'Cell Stacks');
-    addNode('B_C3', 'Clean Buffer #3', 'B', 2480, midY, 10, 1, 'z3', false, 'Cell Stacks');
+    const weldNodes = addParallelBlock('W_L_', '3kW Busbar Laser Welder', 'M', 3240, midY, tWeld, 2, weldCycle, 'z4', 95, false, 'Cell Stacks');
+    addNode('B_C3', 'Clean Buffer #3', 'B', 3360, midY, 20, 1, 'z4', false, 'Cell Stacks');
 
-    const ccdNodes = addParallelBlock('W_CCD_', 'Weld Bead Inspection', 'M', 2600, midY, tCcd, 2, 10, 'z3', 95, false, 'Cell Stacks');
-    addNode('CCD_Sort', 'Bead Quality Gateway', 'M', 2720, midY, 10, 0.1, 'z3', false, 'Cell Stacks');
-    addNode('Q_Bead_Reject', 'Bead Reject Quarantine', 'B', 2720, midY + 130, 50, 0.1, 'z3', false, 'Cell Stacks');
-    addNode('B04', 'Cell Stack Buffer', 'B', 2860, midY, 30, 1, 'z3', false, 'Cell Stacks');
+    const ccdNodes = addParallelBlock('W_CCD_', 'Weld Bead Inspection', 'M', 3500, midY, tCcd, 2, 10, 'z4', 95, false, 'Cell Stacks');
+    addNode('CCD_Sort', 'Bead Quality Gateway', 'M', 3640, midY, 10, 0.1, 'z4', false, 'Cell Stacks');
+    addNode('Q_Bead_Reject', 'Bead Reject Quarantine', 'B', 3640, midY + 140, 100, 0.1, 'z4', false, 'Cell Stacks');
+    addNode('B04', 'Cell Stack Buffer', 'B', 3780, midY, 50, 1, 'z4', false, 'Cell Stacks');
 
-    // --- ZONE 4: PACK MARRIAGE & ASSEMBLY (Z4 - Lower Serpentine Track) ---
-    const lowerY = midY + 420;
-    addNode('P01', 'WH-4 Material Tray Unloader', 'M', 3020, lowerY, 5, 5, 'z4', false, 'Trays');
-    addNode('P02', 'TIM Thermal Paste Dispenser', 'M', 2860, lowerY, 5, 10, 'z4', false, 'Trays');
+    // --- ZONE 5 & ZONE 6: PACK MARRIAGE & ASSEMBLY (Z5 & Z6 - Lower Serpentine Track) ---
+    addNode('W05_Mat_In', 'WH-4 Material Delivery Dock', 'IO', 3780, lowerY, 15000, 0.01, 'z5', false, 'Trays');
+    addNode('B_Mat', 'WH-4 Non-Live Component Store', 'B', 3640, lowerY, 2000, 0.01, 'z5', false, 'Trays');
+    addNode('P01', 'Conveyor Spine / Tray Infeed', 'M', 3500, lowerY, 5, 5, 'z5', false, 'Trays');
+    addNode('C.1.5.2', 'Robotic Pack Cleaning & Dispense', 'M', 3360, lowerY, 5, 15, 'z5', false, 'Trays');
+    addNode('C.1.5.3', 'Cooling Plate Sub-Assembly', 'M', 3220, lowerY, 5, 15, 'z5', false, 'Trays');
+    addNode('P02', 'TIM Thermal Paste Dispenser', 'M', 3080, lowerY, 5, 10, 'z5', false, 'Trays');
+    addNode('C.1.5.5', 'Laser Profilometer (Bond Line)', 'M', 2940, lowerY, 5, 12, 'z5', false, 'Trays');
 
-    addNode('M01', 'Pack Marriage Robot', 'M', 2700, lowerY, 2, 15, 'z4', false, 'Packs');
+    addNode('M01', 'Pack Marriage Robot', 'M', 2780, lowerY, 2, 15, 'z5', false, 'Packs');
     nodes['M01'].auxInventory = 0;
 
-    addNode('M02', 'Structural Fastening Cell', 'M', 2500, lowerY, 2, 20, 'z4', false, 'Packs');
-    addNode('M03', 'HV/LV Harnessing Line', 'M', 2300, lowerY, 2, 25, 'z4', false, 'Packs');
-    addNode('M04', 'BMS Controller Integration', 'M', 2100, lowerY, 2, 15, 'z4', false, 'Packs');
-    addNode('B05', 'Pre-Seal Pack Buffer', 'B', 1940, lowerY, 20, 1, 'z4', false, 'Packs');
-    addNode('E01', 'Pack Cover & Seal Station', 'M', 1780, lowerY, 2, 25, 'z4', false, 'Packs');
+    addNode('M02', 'Structural Fastening Cell', 'M', 2620, lowerY, 2, 20, 'z5', false, 'Packs');
+    addNode('M03', 'BMS Slave & Master Installation', 'M', 2460, lowerY, 2, 15, 'z6', false, 'Packs');
+    addNode('M04', 'HV Cable Routing & Termination', 'M', 2300, lowerY, 2, 25, 'z6', false, 'Packs');
+    addNode('C.1.6.4', 'BMS Tester', 'M', 2140, lowerY, 2, 18, 'z6', false, 'Packs');
+    addNode('C.1.6.5', 'BMS Calibration', 'M', 2000, lowerY, 2, 15, 'z6', false, 'Packs');
+    addNode('C.1.6.6', 'Off-Gas Sensors Integration', 'M', 1860, lowerY, 2, 12, 'z6', false, 'Packs');
+    addNode('C.1.5.8', '2K PU Foam IP67 Gasket Dispenser', 'M', 1720, lowerY, 4, 24, 'z5', false, 'Packs');
+    addNode('C.1.5.9', '2K Adhesive Room-Temp Cure Buffer', 'B', 1580, lowerY, 50, 0.01, 'z5', false, 'Packs');
+    addNode('C.1.5.10', 'Cover Sealing Torque Assembly', 'M', 1440, lowerY, 2, 15, 'z5', false, 'Packs');
+    addNode('B05', 'Pre-Seal Pack Buffer', 'B', 1300, lowerY, 30, 1, 'z5', false, 'Packs');
 
-    // --- ZONE 5: END OF LINE VALIDATION (Z5) ---
-    addNode('B06', 'EOL Test Buffer', 'B', 1620, lowerY, 30, 1, 'z5', false, 'Packs');
-    addNode('T01', 'Helium Leak Detector', 'M', 1460, lowerY, 2, 20, 'z5', false, 'Packs');
-    addNode('T02', 'Hipot Electrical Isolation', 'M', 1300, lowerY, 2, 15, 'z5', false, 'Packs');
+    // --- ZONE 7 & ZONE 8: END OF LINE VALIDATION, AGEING & FINISHED STORE (Z7 & Z8) ---
+    addNode('B06', 'EOL Test Buffer', 'B', 1160, lowerY, 30, 1, 'z7', false, 'Packs');
+    addNode('C.1.7.1', 'Seal Leak Testing', 'M', 1020, lowerY, 2, 25, 'z7', false, 'Packs');
+    addNode('T01', 'IP67 Pressure Decay & Helium Test', 'M', 880, lowerY, 2, 20, 'z7', false, 'Packs');
+    addNode('T02', 'Hipot Electrical Isolation', 'M', 740, lowerY, 2, 15, 'z7', false, 'Packs');
 
     // "E"-Type Multi-Tier Comb / Hatch Array for EOL Battery Cyclers
-    // Distribute cyclers across 3 horizontal prongs/tiers:
-    // Tier A (Top Arm, y = lowerY - 100) -> High-Rate Formation & Pre-Charge
-    // Tier B (Mid Arm, y = lowerY)       -> Retention Aging & OCV Drift
-    // Tier C (Bot Arm, y = lowerY + 100) -> Capacity Verification & DCIR
     const eolArms = 3;
     const cyclerNodes: string[] = [];
     const cyclerPerArm = Math.ceil(tCycler / eolArms);
     const cyclerSpacingX = 80;
     const cyclerArmSpacingY = 100;
-    const cyclerBaseX = 1170;
+    const cyclerBaseX = 660;
     const cyclerBaseY = lowerY;
 
     for (let i = 0; i < tCycler; i++) {
@@ -486,44 +558,48 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       const cycY = cyclerBaseY + (arm - 1) * cyclerArmSpacingY;
       const id = `CY_${i + 1}`;
       const tierLabel = arm === 0 ? 'Tier A Form' : arm === 1 ? 'Tier B Age' : 'Tier C Cap';
-      addNode(id, `EOL Cycler #${i + 1} (${tierLabel})`, 'M', cycX, cycY, 1, cyclerCycle, 'z5', false, 'Packs');
+      addNode(id, `EOL Cycler #${i + 1} (${tierLabel})`, 'M', cycX, cycY, 1, cyclerCycle, 'z7', false, 'Packs');
       cyclerNodes.push(id);
     }
 
     const minCycX = cyclerBaseX - (cyclerPerArm - 1) * cyclerSpacingX;
-    const qgX = Math.min(minCycX - 100, 720);
-    addNode('T_QG', 'Final Quality Gate (QG)', 'M', qgX, lowerY, 2, 10, 'z5', false, 'Packs');
-    addNode('W03_Out', 'WH-2 Pack Racking Store', 'B', qgX - 180, lowerY, 2000, 1, 'z8', false, 'Packs');
-    addNode('W04_Out', 'WH-2 Outbound Dispatch Dock', 'IO', qgX - 360, lowerY, 1000, 1, 'z8', false, 'Packs');
+    const qgX = Math.min(minCycX - 90, 360);
+    addNode('C.1.7.5', 'Vibration Test Rig', 'M', qgX + 40, lowerY + 140, 2, 30, 'z7', false, 'Packs');
+    addNode('T_QG', 'Final Quality Gate (QG)', 'M', qgX, lowerY, 2, 10, 'z7', false, 'Packs');
+    addNode('W03_Out', 'WH-2 Pack Racking Store', 'B', qgX - 140, lowerY, 2000, 1, 'z8', false, 'Packs');
+    addNode('W04_Out', 'WH-2 Outbound Dispatch Dock', 'IO', qgX - 260, lowerY, 1000, 1, 'z8', false, 'Packs');
 
-    // --- ZONE 7: BESS UTILITY INTEGRATION LINE (Z_BESS) ---
-    // Physically fed directly from Pack Marriage Robot M01 via dedicated 20-Pack Buffer Bank
-    const bessY = lowerY + 340;
-    addNode('B_BESS_Buf', 'BESS Pack Buffer Bank (Min. 20 Packs)', 'B', 2700, lowerY + 160, 50, 1, 'z_bess', false, 'Packs');
-    addNode('BESS_Stack', 'BESS Module/Pack Stacking & Rigging', 'M', 2700, bessY, 2, 45, 'z_bess', false, 'Packs');
-    addNode('BESS_Plate', 'Cold Plate Cooling Integration', 'M', 2500, bessY, 2, 35, 'z_bess', false, 'Racks');
-    addNode('BESS_Weld', '1500V DC Busbar Welder', 'M', 2300, bessY, 2, 40, 'z_bess', false, 'Racks');
-    addNode('BESS_BMS', 'HV String BMS Controller Cell', 'M', 2100, bessY, 2, 30, 'z_bess', false, 'Racks');
+    // --- ZONE BESS: BESS UTILITY CONTAINER INTEGRATION LINE (Z_BESS) ---
+    addNode('B_BESS_Buf', 'BESS Pack Buffer Bank (Min. 20 Packs)', 'B', 2780, lowerY + 170, 50, 1, 'z_bess', false, 'Packs');
+    addNode('BESS_Stack', 'BESS Module/Pack Stacking & Rigging', 'M', 2780, bessY, 2, 45, 'z_bess', false, 'Packs');
+    addNode('BESS_Plate', 'Cold Plate Cooling Integration', 'M', 2560, bessY, 2, 35, 'z_bess', false, 'Racks');
+    addNode('BESS_Weld', '1500V DC Busbar Welder', 'M', 2340, bessY, 2, 40, 'z_bess', false, 'Racks');
+    addNode('BESS_BMS', 'HV String BMS Controller Cell', 'M', 2120, bessY, 2, 30, 'z_bess', false, 'Racks');
     addNode('BESS_Test', '1500V Megawatt Hipot Cycler', 'M', 1900, bessY, 2, 120, 'z_bess', false, 'Racks');
-    addNode('BESS_Gantry', 'Twin 30T Gantry Crane Bay', 'M', 1700, bessY, 2, 60, 'z_bess', false, 'Containers');
-    addNode('W05_BESS', 'WH-3 BESS Container Staging Yard', 'IO', 1480, bessY, 50, 1, 'z_bess', false, 'Containers');
+    addNode('BESS_Gantry', 'Twin 30T Gantry Crane Bay', 'M', 1680, bessY, 2, 60, 'z_bess', false, 'Containers');
+    addNode('W05_BESS', 'WH-3 BESS Container Staging Yard', 'IO', 1460, bessY, 50, 1, 'z_bess', false, 'Containers');
 
-    // --- WH-4 MATERIAL DOCK ---
-    addNode('W05_Mat_In', 'WH-4 Material Delivery Dock', 'IO', 3220, lowerY, 15000, 0.01, 'z4', false, 'Trays');
-    addNode('B_Mat', 'WH-4 Non-Live Component Store', 'B', 3120, lowerY, 2000, 0.01, 'z4', false, 'Trays');
+    // Linkages - Top Row
+    addLink('W01', 'C.1.1.1');
+    addLink('C.1.1.1', 'C.1.1.2');
+    addLink('C.1.1.2', 'C.1.1.3');
+    addLink('C.1.1.3', 'C.1.1.4');
+    addLink('C.1.1.4', 'B01');
 
-    // Linkages
-    addLink('W01', 'W02');
-    addLink('W02', 'B01');
     ocvNodes.forEach(id => addLink('B01', id));
     ocvNodes.forEach(id => addLink(id, 'C_Sort'));
-    addLink('C_Sort', 'C_Clean');
+    addLink('C_Sort', 'C.1.2.2');
     addLink('C_Sort', 'Q_Bay');
+    addLink('C.1.2.2', 'C.1.2.3');
+    addLink('C.1.2.3', 'C_Clean');
     addLink('C_Clean', 'B02');
 
     stackNodes.forEach(id => addLink('B02', id));
-    stackNodes.forEach(id => addLink(id, 'S_Comp'));
-    addLink('S_Comp', 'B03');
+    stackNodes.forEach(id => addLink(id, 'S_Adhesive'));
+    addLink('S_Adhesive', 'S_Comp');
+    addLink('S_Comp', 'C.1.3.4');
+    addLink('C.1.3.4', 'C.1.3.5');
+    addLink('C.1.3.5', 'B03');
 
     clnNodes.forEach(id => addLink('B03', id));
     clnNodes.forEach(id => addLink(id, 'B_C1'));
@@ -539,30 +615,41 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     addLink('CCD_Sort', 'B04');
     addLink('CCD_Sort', 'Q_Bead_Reject');
 
-    // Branch to EV Pack Assembly
+    // Linkages - Lower Serpentine Track
     addLink('W05_Mat_In', 'B_Mat');
     addLink('B_Mat', 'P01');
-    addLink('P01', 'P02');
-    addLink('P02', 'M01');
+    addLink('P01', 'C.1.5.2');
+    addLink('C.1.5.2', 'C.1.5.3');
+    addLink('C.1.5.3', 'P02');
+    addLink('P02', 'C.1.5.5');
+    addLink('C.1.5.5', 'M01');
 
     addLink('B04', 'M01');
     addLink('M01', 'M02');
     addLink('M02', 'M03');
     addLink('M03', 'M04');
-    addLink('M04', 'B05');
-    addLink('B05', 'E01');
-    addLink('E01', 'B06');
+    addLink('M04', 'C.1.6.4');
+    addLink('C.1.6.4', 'C.1.6.5');
+    addLink('C.1.6.5', 'C.1.6.6');
+    addLink('C.1.6.6', 'C.1.5.8');
+    addLink('C.1.5.8', 'C.1.5.9');
+    addLink('C.1.5.9', 'C.1.5.10');
+    addLink('C.1.5.10', 'B05');
+    addLink('B05', 'B06');
 
-    addLink('B06', 'T01');
+    addLink('B06', 'C.1.7.1');
+    addLink('C.1.7.1', 'T01');
     addLink('T01', 'T02');
 
     cyclerNodes.forEach(id => addLink('T02', id));
     cyclerNodes.forEach(id => addLink(id, 'T_QG'));
+    addLink('T02', 'C.1.7.5');
+    addLink('C.1.7.5', 'T_QG');
 
     addLink('T_QG', 'W03_Out');
     addLink('W03_Out', 'W04_Out');
 
-    // Branch to BESS Integration Line (Fed directly from Pack Marriage M01 through Buffer Bank)
+    // Linkages - BESS Integration Line
     addLink('M01', 'B_BESS_Buf');
     addLink('B_BESS_Buf', 'BESS_Stack');
     addLink('BESS_Stack', 'BESS_Plate');
@@ -574,14 +661,143 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
     // Plant zones definition mapping
     plantZonesRef.current = {
-      'Z1: CELL RECEIVING & OCV SORTING': ['W01', 'W02', 'B01', ...ocvNodes, 'C_Sort', 'Q_Bay', 'C_Clean', 'B02'],
-      'Z2: CELL STACKING & COMPRESSION': [...stackNodes, 'S_Comp', 'B03'],
-      'Z3: CLEANROOM LASER BUSBAR WELDING': [...clnNodes, 'B_C1', ...fpcNodes, 'B_C2', ...weldNodes, 'B_C3', ...ccdNodes, 'CCD_Sort', 'Q_Bead_Reject', 'B04'],
-      'Z4: PACK MARRIAGE & ASSEMBLY': ['W05_Mat_In', 'B_Mat', 'P01', 'P02', 'M01', 'M02', 'M03', 'M04', 'B05', 'E01'],
-      'Z5: END-OF-LINE TESTING & QUALITY': ['B06', 'T01', 'T02', ...cyclerNodes, 'T_QG'],
+      'Z1: CELL RECEIVING & INBOUND HANDLING': ['W01', 'C.1.1.1', 'C.1.1.2', 'C.1.1.3', 'C.1.1.4', 'B01'],
+      'Z2: CELL CONDITIONING, GRADING & SORTING': [...ocvNodes, 'C_Sort', 'Q_Bay', 'C.1.2.2', 'C.1.2.3', 'C_Clean', 'B02'],
+      'Z3: CELL STACKING, 2K ADHESIVE & COMPRESSION': [...stackNodes, 'S_Adhesive', 'S_Comp', 'C.1.3.4', 'C.1.3.5', 'B03'],
+      'Z4: CLEANROOM LASER BUSBAR WELDING': [...clnNodes, 'B_C1', ...fpcNodes, 'B_C2', ...weldNodes, 'B_C3', ...ccdNodes, 'CCD_Sort', 'Q_Bead_Reject', 'B04'],
+      'Z5: PACK MARRIAGE & SEALING ASSEMBLY': ['W05_Mat_In', 'B_Mat', 'P01', 'C.1.5.2', 'C.1.5.3', 'P02', 'C.1.5.5', 'M01', 'M02', 'C.1.5.8', 'C.1.5.9', 'C.1.5.10', 'B05'],
+      'Z6: BMS & ELECTRICAL HARNESSING': ['M03', 'M04', 'C.1.6.4', 'C.1.6.5', 'C.1.6.6'],
+      'Z7: END-OF-LINE TESTING & QUALITY': ['B06', 'C.1.7.1', 'T01', 'T02', ...cyclerNodes, 'C.1.7.5', 'T_QG'],
       'Z8: PACKAGING & FINISHED STORE (4-DAY BUFFER)': ['W03_Out', 'W04_Out'],
       'Z_BESS: BESS CONTAINER & RACK INTEGRATION': ['B_BESS_Buf', 'BESS_Stack', 'BESS_Plate', 'BESS_Weld', 'BESS_BMS', 'BESS_Test', 'BESS_Gantry', 'W05_BESS'],
     };
+
+    // Dictionary of Census machine alias mappings to standard model nodes
+    const censusNodeMap: Record<string, string> = {
+      'C.1.1.1': 'C.1.1.1',
+      'C.1.1.2': 'C.1.1.2',
+      'C.1.1.3': 'C.1.1.3',
+      'C.1.1.4': 'C.1.1.4',
+      'C.1.2.1': 'OCV_1',
+      'C.1.2.2': 'C.1.2.2',
+      'C.1.2.3': 'C.1.2.3',
+      'C.1.2.4': 'C_Clean',
+      'C.1.3.1': 'S_BOT_1',
+      'C.1.3.2': 'S_Adhesive',
+      'C.1.3.3': 'S_Comp',
+      'C.1.3.4': 'C.1.3.4',
+      'C.1.3.5': 'C.1.3.5',
+      'C.1.4.1': 'W_CLN_1',
+      'C.1.4.2': 'W_L_1',
+      'C.1.4.3': 'W_CCD_1',
+      'C.1.5.1': 'P01',
+      'C.1.5.2': 'C.1.5.2',
+      'C.1.5.3': 'C.1.5.3',
+      'C.1.5.4': 'P02',
+      'C.1.5.5': 'C.1.5.5',
+      'C.1.5.6': 'M01',
+      'C.1.5.7': 'M02',
+      'C.1.5.8': 'C.1.5.8',
+      'C.1.5.9': 'C.1.5.9',
+      'C.1.5.10': 'C.1.5.10',
+      'C.1.6.1': 'W_FPC_1',
+      'C.1.6.2': 'M03',
+      'C.1.6.3': 'M04',
+      'C.1.6.4': 'C.1.6.4',
+      'C.1.6.5': 'C.1.6.5',
+      'C.1.6.6': 'C.1.6.6',
+      'C.1.7.1': 'C.1.7.1',
+      'C.1.7.2': 'T01',
+      'C.1.7.3': 'T02',
+      'C.1.7.4': 'CY_1',
+      'C.1.7.5': 'C.1.7.5',
+      'C.2.1.1': 'BESS_Stack',
+      'C.2.1.2': 'BESS_Plate',
+      'C.2.1.3': 'BESS_Weld',
+      'C.2.1.4': 'BESS_BMS',
+      'C.2.1.5': 'BESS_Test',
+      'C.2.1.6': 'BESS_Gantry',
+      'C.2.1.7': 'W05_BESS',
+    };
+
+    // Dynamically instantiate and route ANY custom machines added from the Machine Census
+    (zones || []).forEach(z => {
+      z.machines.forEach(m => {
+        const mappedId = censusNodeMap[m.id] || m.id;
+        // If node already exists or is mapped to a standard machine, do not create duplicate
+        if (nodes[mappedId] || nodes[m.id]) return;
+
+        let posX = 1500;
+        let posY = midY;
+
+        // Helper to find a node by ID, WBS code, or station name
+        const findNodeRef = (refKey?: string) => {
+          if (!refKey || refKey === 'auto') return null;
+          const targetKey = censusNodeMap[refKey] || refKey;
+          if (nodes[targetKey]) return nodes[targetKey];
+          if (nodes[refKey]) return nodes[refKey];
+          // Match against wbs code or id
+          for (const nid in nodes) {
+            if (nid.toLowerCase() === refKey.toLowerCase() || nodes[nid].label.toLowerCase().includes(refKey.toLowerCase())) {
+              return nodes[nid];
+            }
+          }
+          return null;
+        };
+
+        const prev = findNodeRef(m.precedingStationId);
+        const next = findNodeRef(m.succeedingStationId);
+
+        if (prev && next) {
+          posX = (prev.x + next.x) / 2;
+          posY = (prev.y + next.y) / 2;
+        } else if (prev) {
+          const isLower = prev.y > midY + 100;
+          posX = isLower ? prev.x - 140 : prev.x + 140;
+          posY = prev.y;
+        } else if (next) {
+          const isLower = next.y > midY + 100;
+          posX = isLower ? next.x + 140 : next.x - 140;
+          posY = next.y;
+        } else {
+          const zoneKey = z.wbsCode.toLowerCase();
+          if (zoneKey.includes('z1')) { posX = 750; posY = midY; }
+          else if (zoneKey.includes('z2')) { posX = 1630; posY = midY; }
+          else if (zoneKey.includes('z3')) { posX = 2510; posY = midY; }
+          else if (zoneKey.includes('z4')) { posX = 3040; posY = midY; }
+          else if (zoneKey.includes('z5')) { posX = 3150; posY = lowerY; }
+          else if (zoneKey.includes('z6')) { posX = 2220; posY = lowerY; }
+          else if (zoneKey.includes('z7') || zoneKey.includes('z8')) { posX = 950; posY = lowerY; }
+          else if (zoneKey.includes('bess')) { posX = 2200; posY = bessY; }
+        }
+
+        const unitType = m.unit || (z.wbsCode === 'Z1' ? 'Cells' : z.wbsCode === 'Z4' || z.wbsCode === 'Z5' ? 'Packs' : 'Cell Stacks');
+        addNode(
+          m.id,
+          m.name,
+          'M',
+          posX,
+          posY,
+          Math.max(2, m.machinesCount * (m.packsPerCycle || 1) * 2),
+          Math.max(1, m.cycleTimeSec / Math.max(1, m.machinesCount)),
+          z.id,
+          false,
+          unitType
+        );
+
+        if (prev) {
+          addLink(prev.id, m.id);
+        }
+        if (next) {
+          addLink(m.id, next.id);
+        }
+
+        const targetZoneHeader = Object.keys(plantZonesRef.current).find(k => k.includes(z.wbsCode)) || 'Z3: CELL STACKING, 2K ADHESIVE & COMPRESSION';
+        if (plantZonesRef.current[targetZoneHeader]) {
+          plantZonesRef.current[targetZoneHeader].push(m.id);
+        }
+      });
+    });
 
     // Caption width budget: the gap to the nearest station on the same row,
     // less a small margin. A station standing alone keeps its full name; one in
@@ -622,16 +838,124 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     nodesRef.current = nodes;
     linksRef.current = links;
 
-    // Initial stock
-    nodes['W01'].inventory = 120000;
-    nodes['B01'].inventory = 4500;
-    nodes['B02'].inventory = 250;
-    nodes['B03'].inventory = 12;
-    nodes['B04'].inventory = 15;
-    nodes['B_BESS_Buf'].inventory = 20; // Min. 20 Pack buffer bank initialized
-    nodes['B_Mat'].inventory = 120;
-    nodes['W03_Out'].inventory = 280;
-  }, [FACTORY_H, stackerCycle, weldCycle, cyclerCycle, requiredLineTakt, cellsPerPack, tOCV, tStack, tCln, tFpc, tWeld, tCcd, tCycler]);
+    // Initial stock - calibrated for steady-state 26.7s cadence vs cold-start priming
+    const isPrimed = forcePrimed !== undefined ? forcePrimed : (simState.isPrimed ?? true);
+    nodes['W01'].inventory = 150000;
+    nodes['B_Mat'].inventory = 1000;
+    if (!isPrimed) {
+      nodes['B01'].inventory = 0;
+      nodes['B02'].inventory = 0;
+      nodes['B03'].inventory = 0;
+      nodes['B04'].inventory = 0;
+      if (nodes['B_C1']) nodes['B_C1'].inventory = 0;
+      if (nodes['B_C2']) nodes['B_C2'].inventory = 0;
+      if (nodes['B_C3']) nodes['B_C3'].inventory = 0;
+      if (nodes['B05']) nodes['B05'].inventory = 0;
+      if (nodes['B06']) nodes['B06'].inventory = 0;
+      nodes['B_BESS_Buf'].inventory = 0;
+      nodes['W03_Out'].inventory = 0;
+      if (nodes['W04_Out']) nodes['W04_Out'].inventory = 0;
+      for (const nid in nodes) {
+        nodes[nid].cycleCount = 0;
+        nodes[nid].targetRoute = null;
+      }
+    } else {
+      nodes['B01'].inventory = 4500;
+      nodes['B02'].inventory = 250;
+      nodes['B03'].inventory = 12;
+      if (nodes['B_C1']) nodes['B_C1'].inventory = 4;
+      if (nodes['B_C2']) nodes['B_C2'].inventory = 4;
+      if (nodes['B_C3']) nodes['B_C3'].inventory = 4;
+      nodes['B04'].inventory = 15;
+      if (nodes['B05']) nodes['B05'].inventory = 10;
+      if (nodes['B06']) nodes['B06'].inventory = 12;
+      nodes['B_BESS_Buf'].inventory = 20;
+      nodes['W03_Out'].inventory = 280;
+      if (nodes['W04_Out']) nodes['W04_Out'].inventory = 35;
+      // Pre-seed logical, sequential gradient of completed production cycles down the line
+      for (const nid in nodes) {
+        const n = nodes[nid];
+        const prevCount = nodesRef.current[nid]?.cycleCount;
+        if (prevCount && prevCount > 0) {
+          n.cycleCount = prevCount;
+        } else if (n.zoneId === 'z1') {
+          n.cycleCount = 1250;
+        } else if (n.zoneId === 'z2') {
+          n.cycleCount = 1220;
+        } else if (n.zoneId === 'z3') {
+          n.cycleCount = 1190;
+        } else if (n.zoneId === 'z4') {
+          n.cycleCount = 1165;
+        } else if (n.zoneId === 'z5') {
+          n.cycleCount = 1145;
+        } else if (n.zoneId === 'z6') {
+          n.cycleCount = 1125;
+        } else if (n.zoneId === 'z7') {
+          n.cycleCount = 1105;
+        } else if (n.zoneId === 'z8') {
+          n.cycleCount = 1080;
+        } else if (n.zoneId === 'z_bess') {
+          n.cycleCount = 24;
+        } else {
+          n.cycleCount = 1000;
+        }
+        n.targetRoute = null;
+      }
+    }
+  }, [FACTORY_H, stackerCycle, weldCycle, cyclerCycle, requiredLineTakt, cellsPerPack, tOCV, tStack, tCln, tFpc, tWeld, tCcd, tCycler, zones, simState.isPrimed]);
+
+  // Start / Simulate Cold-Start Priming
+  const handleStartColdPriming = () => {
+    if (setSimState) {
+      setSimState(prev => ({
+        ...prev,
+        isPrimed: false,
+        primingProgressPct: 0,
+        primingLeadTimeSec: dynamicPrimingTimeSec,
+        shiftTimeSeconds: 0,
+        goodPacks: 0,
+        processedPacks: 0,
+        reworkedPacks: 0,
+        scrappedPacks: 0,
+        isRunning: true,
+      }));
+    }
+    statsRef.current = { cellsIn: 0, packsOut: 0 };
+    particlesRef.current = [];
+    trucksRef.current = [];
+    floatingTextsRef.current.push({
+      text: `⏱️ Cold-Start Priming Active (Est. Lead: ${(dynamicPrimingTimeSec / 60).toFixed(0)} min)`,
+      x: 1900,
+      y: 950,
+      color: '#06B6D4',
+      life: 3.5,
+    });
+    buildFactoryModel(false);
+  };
+
+  // Switch to Pre-Primed Steady-State 26.7s Cadence
+  const handleSetSteadyState = () => {
+    if (setSimState) {
+      setSimState(prev => ({
+        ...prev,
+        isPrimed: true,
+        primingProgressPct: 100,
+        primingLeadTimeSec: dynamicPrimingTimeSec,
+        shiftTimeSeconds: Math.max(prev.shiftTimeSeconds, dynamicPrimingTimeSec),
+        goodPacks: Math.max(1, prev.goodPacks),
+        processedPacks: Math.max(1, prev.processedPacks),
+        isRunning: true,
+      }));
+    }
+    floatingTextsRef.current.push({
+      text: `🚀 Steady-State Active: ${requiredLineTakt}s Continuous Cadence`,
+      x: 1900,
+      y: 950,
+      color: '#10B981',
+      life: 3.5,
+    });
+    buildFactoryModel(true);
+  };
 
   // Apply Capacity Settings Handler
   const handleApplyCapacity = () => {
@@ -882,26 +1206,214 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     });
   };
 
-  // Auto-Center & Fit Plant Floor in Workspace (Centered at X: 1780, Y: 2625)
+  // Touch Gesture Ref State (Pinch-to-zoom, single finger pan, station tap)
+  const touchStateRef = useRef<{
+    startX: number;
+    startY: number;
+    startDist: number;
+    startScale: number;
+    startCamX: number;
+    startCamY: number;
+    isPinching: boolean;
+    touchStartTime: number;
+    hasMoved: boolean;
+  }>({
+    startX: 0,
+    startY: 0,
+    startDist: 0,
+    startScale: 1,
+    startCamX: 0,
+    startCamY: 0,
+    isPinching: false,
+    touchStartTime: 0,
+    hasMoved: false,
+  });
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      const clientX = t.clientX;
+      const clientY = t.clientY;
+      const worldX = (clientX - rect.left - camera.x) / camera.scale;
+      const worldY = (clientY - rect.top - camera.y) / camera.scale;
+
+      touchStateRef.current = {
+        startX: clientX,
+        startY: clientY,
+        startDist: 0,
+        startScale: camera.scale,
+        startCamX: camera.x,
+        startCamY: camera.y,
+        isPinching: false,
+        touchStartTime: Date.now(),
+        hasMoved: false,
+      };
+
+      // Check if tapping a node
+      let touchedNodeId: string | null = null;
+      for (const id in nodesRef.current) {
+        const n = nodesRef.current[id];
+        if (
+          worldX >= n.x - n.w / 2 - 12 &&
+          worldX <= n.x + n.w / 2 + 12 &&
+          worldY >= n.y - n.h / 2 - 12 &&
+          worldY <= n.y + n.h / 2 + 12
+        ) {
+          touchedNodeId = id;
+          break;
+        }
+      }
+
+      if (!isLayoutLocked && touchedNodeId) {
+        draggingNodeIdRef.current = touchedNodeId;
+        const targetNode = nodesRef.current[touchedNodeId];
+        dragOffsetRef.current = { x: worldX - targetNode.x, y: worldY - targetNode.y };
+        setIsNodeDragging(true);
+      }
+    } else if (e.touches.length === 2) {
+      // Pinch-to-zoom multi-touch start
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const midX = (t1.clientX + t2.clientX) / 2 - rect.left;
+      const midY = (t1.clientY + t2.clientY) / 2 - rect.top;
+
+      touchStateRef.current = {
+        startX: midX,
+        startY: midY,
+        startDist: Math.max(10, dist),
+        startScale: camera.scale,
+        startCamX: camera.x,
+        startCamY: camera.y,
+        isPinching: true,
+        touchStartTime: Date.now(),
+        hasMoved: true,
+      };
+      draggingNodeIdRef.current = null;
+      setIsNodeDragging(false);
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+
+    if (e.touches.length === 1 && !touchStateRef.current.isPinching) {
+      const t = e.touches[0];
+      const dx = t.clientX - touchStateRef.current.startX;
+      const dy = t.clientY - touchStateRef.current.startY;
+      if (Math.hypot(dx, dy) > 5) {
+        touchStateRef.current.hasMoved = true;
+      }
+
+      if (!isLayoutLocked && draggingNodeIdRef.current) {
+        const worldX = (t.clientX - rect.left - camera.x) / camera.scale;
+        const worldY = (t.clientY - rect.top - camera.y) / camera.scale;
+        const n = nodesRef.current[draggingNodeIdRef.current];
+        if (n) {
+          n.x = Math.round(worldX - dragOffsetRef.current.x);
+          n.y = Math.round(worldY - dragOffsetRef.current.y);
+        }
+      } else {
+        // Single-touch plant floor pan
+        setCamera(prev => ({
+          ...prev,
+          x: touchStateRef.current.startCamX + dx,
+          y: touchStateRef.current.startCamY + dy,
+        }));
+      }
+    } else if (e.touches.length === 2) {
+      // Pinch-to-zoom live interpolation
+      const t1 = e.touches[0];
+      const t2 = e.touches[1];
+      const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
+      const midX = (t1.clientX + t2.clientX) / 2 - rect.left;
+      const midY = (t1.clientY + t2.clientY) / 2 - rect.top;
+
+      const scaleRatio = dist / touchStateRef.current.startDist;
+      const newScale = Math.min(2.5, Math.max(0.18, touchStateRef.current.startScale * scaleRatio));
+
+      const worldPinchX = (touchStateRef.current.startX - touchStateRef.current.startCamX) / touchStateRef.current.startScale;
+      const worldPinchY = (touchStateRef.current.startY - touchStateRef.current.startCamY) / touchStateRef.current.startScale;
+
+      setCamera({
+        scale: newScale,
+        x: Math.round(midX - worldPinchX * newScale),
+        y: Math.round(midY - worldPinchY * newScale),
+      });
+      touchStateRef.current.hasMoved = true;
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (draggingNodeIdRef.current) {
+      const nodeId = draggingNodeIdRef.current;
+      if (!touchStateRef.current.hasMoved) {
+        setSelectedNodeId(nodeId);
+        const node = nodesRef.current[nodeId];
+        if (node && onSelectZone) onSelectZone(node.zoneId);
+      } else {
+        void commitStationMove(nodeId);
+      }
+      draggingNodeIdRef.current = null;
+      setIsNodeDragging(false);
+    } else if (!touchStateRef.current.hasMoved && Date.now() - touchStateRef.current.touchStartTime < 300) {
+      // Tap on a station
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const touchX = touchStateRef.current.startX;
+        const touchY = touchStateRef.current.startY;
+        const worldX = (touchX - rect.left - camera.x) / camera.scale;
+        const worldY = (touchY - rect.top - camera.y) / camera.scale;
+
+        let foundNode: string | null = null;
+        for (const id in nodesRef.current) {
+          const n = nodesRef.current[id];
+          if (
+            worldX >= n.x - n.w / 2 - 14 &&
+            worldX <= n.x + n.w / 2 + 14 &&
+            worldY >= n.y - n.h / 2 - 14 &&
+            worldY <= n.y + n.h / 2 + 14
+          ) {
+            foundNode = id;
+            break;
+          }
+        }
+        setSelectedNodeId(foundNode);
+        if (foundNode && nodesRef.current[foundNode] && onSelectZone) {
+          onSelectZone(nodesRef.current[foundNode].zoneId);
+        }
+      }
+    }
+    touchStateRef.current.isPinching = false;
+  };
+
+  // Auto-Center & Fit Plant Floor in Workspace (Centered at X: 1900, Y: 1050)
   const fitCameraToPlantFloor = useCallback((customW?: number, customH?: number) => {
     const canvas = canvasRef.current;
     const parent = canvas?.parentElement;
     const w = customW || canvas?.width || (parent ? parent.clientWidth : window.innerWidth) || 1400;
     const h = customH || canvas?.height || (parent ? parent.clientHeight : window.innerHeight) || 800;
 
-    // Plant layout spans X: ~60 to ~3400 (width ~ 3340), Y: ~1900 to ~3250 (height ~ 1350)
-    const plantW = 3400;
-    const plantH = 1350;
+    // Plant layout spans X: ~60 to ~3850 (width ~ 3800), Y: ~400 to ~1600 (height ~ 1200)
+    const plantW = 3900;
+    const plantH = 1450;
     const paddingX = 60;
     const paddingY = 60;
 
     const scaleX = (w - paddingX * 2) / Math.max(100, plantW);
     const scaleY = (h - paddingY * 2) / Math.max(100, plantH);
-    const optimalScale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.2), 0.55);
+    const optimalScale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.18), 0.55);
 
     // Target center coordinates specified by engineering blueprint
-    const targetCenterX = 1780;
-    const targetCenterY = 2625;
+    const targetCenterX = 1900;
+    const targetCenterY = 1050;
 
     const newCam = {
       x: Math.round(w / 2 - targetCenterX * optimalScale),
@@ -929,8 +1441,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     } catch {
       floatingTextsRef.current.push({
         text: 'Could not clear saved positions — layout unchanged for others',
-        x: 1780,
-        y: 2525,
+        x: 1900,
+        y: 950,
         color: '#EF4444',
         life: 3.5,
       });
@@ -939,8 +1451,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     buildFactoryModel();
     floatingTextsRef.current.push({
       text: 'Floor Layout Reset to Default',
-      x: 1780,
-      y: 2525,
+      x: 1900,
+      y: 950,
       color: '#10B981',
       life: 2.5,
     });
@@ -1027,8 +1539,17 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         materialTimerRef.current = 3600 / Math.max(0.1, materialRate);
       }
 
-      if (nodes['W04_Out'] && nodes['W04_Out'].inventory >= outboundBatch) {
+      // STRICT GATING FOR OUTBOUND DISPATCH (W04_Out):
+      // Gated by priming completion AND actual physical finished inventory accumulation in W04_Out
+      const isLinePrimed = (simState.isPrimed ?? true) || simState.shiftTimeSeconds >= dynamicPrimingTimeSec;
+      const w04Node = nodes['W04_Out'];
+      const finishedPacksAvailable = w04Node ? w04Node.inventory : 0;
+
+      outboundTimerRef.current -= simDt;
+      if (isLinePrimed && w04Node && finishedPacksAvailable >= outboundBatch && outboundTimerRef.current <= 0) {
         dispatchTruck('outbound_pack', 'W04_Out', 1, outboundBatch);
+        // Minimum pacing between outbound dispatch runs to prevent duplicate truck spawns
+        outboundTimerRef.current = Math.max(12, requiredLineTakt * outboundBatch * 0.8);
       }
 
       // Update Truck Movements & Docking
@@ -1123,7 +1644,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         }
 
         if (n.type === 'M') {
-          if (canStart && n.currentTimer === 0 && n.status !== 'holding') {
+          if (canStart && n.currentTimer === 0 && n.status !== 'holding' && n.status !== 'blocked') {
             let pTime = n.processingTime;
             if (id.startsWith('S_BOT_')) pTime = stackerCycle;
             if (id.startsWith('W_L_')) pTime = weldCycle;
@@ -1137,8 +1658,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           else n.status = 'idle';
         }
 
-        // Push to Next Line Nodes
-        if (n.status === 'holding' && n.next.length > 0) {
+        // Push to Next Line Nodes (from holding or unblocking machine / buffer)
+        if ((n.status === 'holding' || n.status === 'blocked') && n.next.length > 0) {
           const availableNexts = n.next.filter(nxt => {
             const nextNode = nodes[nxt];
             if (!nextNode) return false;
@@ -1152,11 +1673,18 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             let targetId: string | null = null;
 
             if (id === 'C_Sort') {
-              const isDefect = Math.random() < defectRate / 100;
-              targetId = isDefect && availableNexts.includes('Q_Bay') ? 'Q_Bay' : 'C_Clean';
+              if (!n.targetRoute) {
+                // Determine defect status ONCE when unit completes; do not re-roll 60Hz while blocked
+                const isDefect = Math.random() < (defectRate / 100);
+                n.targetRoute = isDefect ? 'Q_Bay' : 'C.1.2.2';
+              }
+              targetId = availableNexts.includes(n.targetRoute) ? n.targetRoute : null;
             } else if (id === 'CCD_Sort') {
-              const isDefect = Math.random() < (defectRate * 1.2) / 100;
-              targetId = isDefect && availableNexts.includes('Q_Bead_Reject') ? 'Q_Bead_Reject' : 'B04';
+              if (!n.targetRoute) {
+                const isDefect = Math.random() < ((defectRate * 0.6) / 100);
+                n.targetRoute = isDefect ? 'Q_Bead_Reject' : 'B04';
+              }
+              targetId = availableNexts.includes(n.targetRoute) ? n.targetRoute : null;
             } else if (id === 'M01') {
               // Pack Marriage Robot M01 distributes finished packs to EV Line (M02) and BESS Buffer Bank (B_BESS_Buf)
               const bessBuf = nodes['B_BESS_Buf'];
@@ -1187,15 +1715,31 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   n.inventory -= batchRequired;
                 }
 
-                if (id === 'P02' && targetId === 'M01') {
+                if ((id === 'P02' || id === 'C.1.5.5') && targetId === 'M01') {
                   nodes[targetId].auxInventory = (nodes[targetId].auxInventory || 0) + outputQty;
                 } else {
                   nodes[targetId].inventory += outputQty;
                 }
 
+                // Increment sequential completed cycles on machine
+                if (n.type === 'M') {
+                  n.cycleCount = (n.cycleCount || 0) + 1;
+                }
+                // Clear single-unit target route once transferred
+                n.targetRoute = null;
+
                 // Spawn particle
                 let pType: 'cell' | 'cell_stack' | 'pack' | 'tray' = 'cell';
-                if (id.startsWith('S_BOT_') || id.startsWith('W_') || id === 'CCD_Sort' || id === 'B04') {
+                if (
+                  id.startsWith('S_') ||
+                  id.startsWith('W_') ||
+                  id === 'CCD_Sort' ||
+                  id === 'B03' ||
+                  id === 'B04' ||
+                  id.startsWith('B_C') ||
+                  id === 'C.1.3.4' ||
+                  id === 'C.1.3.5'
+                ) {
                   pType = 'cell_stack';
                 }
                 if (
@@ -1207,11 +1751,16 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                   id.startsWith('CY_') ||
                   id.startsWith('W03') ||
                   id === 'B_BESS_Buf' ||
-                  id.startsWith('BESS_')
+                  id.startsWith('BESS_') ||
+                  id.startsWith('C.1.5.6') ||
+                  id.startsWith('C.1.5.7') ||
+                  id.startsWith('C.1.5.8') ||
+                  id.startsWith('C.1.6.') ||
+                  id.startsWith('C.1.7.')
                 ) {
                   pType = 'pack';
                 }
-                if (id.startsWith('P0') || id === 'B_Mat' || id === 'W05_Mat_In') {
+                if (id.startsWith('P0') || id === 'B_Mat' || id === 'W05_Mat_In' || id.startsWith('C.1.5.1') || id.startsWith('C.1.5.2') || id.startsWith('C.1.5.3') || id.startsWith('C.1.5.4') || id.startsWith('C.1.5.5')) {
                   pType = 'tray';
                 }
 
@@ -1248,6 +1797,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             } else {
               if (n.type === 'M') n.status = 'blocked';
             }
+          } else {
+            if (n.type === 'M') n.status = 'blocked';
           }
         }
       }
@@ -1268,6 +1819,43 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         ft.y -= 0.6;
         ft.life -= 0.03;
         if (ft.life <= 0) floatingTexts.splice(i, 1);
+      }
+
+      // Periodic Quarantine Bay Clearance to prevent full-buffer deadlocks
+      const qBay = nodes['Q_Bay'];
+      if (qBay && qBay.inventory >= 12) {
+        const teardownQty = Math.min(10, qBay.inventory);
+        qBay.inventory -= teardownQty;
+        floatingTexts.push({
+          id: `ft-${Date.now()}`,
+          text: `-${teardownQty} Defect Cells to QA Teardown`,
+          x: qBay.x,
+          y: qBay.y - 35,
+          color: '#F43F5E',
+          life: 2.5,
+        });
+      }
+
+      const qBead = nodes['Q_Bead_Reject'];
+      if (qBead && qBead.inventory >= 4) {
+        const reworkQty = Math.min(4, qBead.inventory);
+        qBead.inventory -= reworkQty;
+        floatingTexts.push({
+          id: `ft-${Date.now()}`,
+          text: `-${reworkQty} Defect Stacks to Rework`,
+          x: qBead.x,
+          y: qBead.y - 35,
+          color: '#FB923C',
+          life: 2.5,
+        });
+      }
+
+      // Safe bounds to eliminate memory spikes and freezing
+      if (particles.length > 200) {
+        particles.splice(0, particles.length - 200);
+      }
+      if (floatingTexts.length > 25) {
+        floatingTexts.splice(0, floatingTexts.length - 25);
       }
     };
 
@@ -1304,8 +1892,9 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       ctx.save();
-      ctx.translate(camera.x, camera.y);
-      ctx.scale(camera.scale, camera.scale);
+      const cam = cameraRef.current;
+      ctx.translate(cam.x, cam.y);
+      ctx.scale(cam.scale, cam.scale);
 
       // Blueprint Background Grid
       if (showGrid) {
@@ -1550,12 +2139,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
         ctx.font = 'bold 10px sans-serif';
         const stockText =
-          id === 'M01' ? `${n.inventory} + ${n.auxInventory || 0} trays` : `${n.inventory}/${n.cap}`;
-        // The id is what makes a station identifiable, so when there is not
-        // room for both it is the stock figure that goes, not the id.
-        const idLine = `${id}  ·  ${stockText}`;
+          id === 'M01' ? `${n.inventory}+${n.auxInventory || 0}t` : `${n.inventory}/${n.cap}`;
+        const cycleText = n.type === 'M' && n.cycleCount > 0 ? ` · #${n.cycleCount}` : '';
+        const idLine = `${id}${cycleText}  ·  ${stockText}`;
         ctx.fillText(
-          ctx.measureText(idLine).width <= budget ? idLine : elideToWidth(ctx, id, budget),
+          elideToWidth(ctx, idLine, budget),
           n.x,
           ry + n.h + 13
         );
@@ -1659,7 +2247,8 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     const loop = (timestamp: number) => {
       let dt = (timestamp - lastTime) / 1000;
       lastTime = timestamp;
-      if (dt > 0.1) dt = 0.1;
+      if (isNaN(dt) || dt <= 0) dt = 0.016;
+      if (dt > 0.05) dt = 0.05;
 
       updateSimulation(dt);
       renderCanvas();
@@ -1669,7 +2258,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
     animationFrameId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animationFrameId);
-  }, [simState.isRunning, simState.simulationSpeed, inboundRate, materialRate, outboundBatch, stackerCycle, weldCycle, cyclerCycle, defectRate, cellsPerPack, showParticles, showTrucks, showGrid, selectedNodeId, camera]);
+  }, [simState.isRunning, simState.simulationSpeed, inboundRate, materialRate, outboundBatch, stackerCycle, weldCycle, cyclerCycle, defectRate, cellsPerPack, showParticles, showTrucks, showGrid, selectedNodeId]);
 
   // Active selected node details for Inspector
   const selectedNode = selectedNodeId ? nodesRef.current[selectedNodeId] : null;
@@ -1679,16 +2268,22 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
     <div className={`flex h-full w-full overflow-hidden relative select-none transition-colors duration-200 ${
       isDark ? 'bg-[#0B0C0E] text-[#D1D5DB]' : 'bg-slate-50 text-slate-800'
     }`}>
+      {/* Mobile Drawer Backdrop Overlay */}
+      {isControlPanelOpen && (
+        <div
+          onClick={() => setIsControlPanelOpen(false)}
+          className="lg:hidden fixed inset-0 bg-black/60 backdrop-blur-xs z-35 transition-opacity"
+        />
+      )}
+
       {/* Floating Operational Controller Drawer (Left) */}
       <div
-        // No `overflow-hidden` here: the collapse button is positioned at
-        // -right-3.5, so clipping the drawer clipped the only control that
-        // reopens it. The inner content keeps its own overflow rules.
-        className={`absolute top-0 left-0 bottom-0 z-30 border-r transition-all duration-300 flex flex-col ${
+        // No `overflow-hidden` on the outer shell so the desktop collapse button stays clickable.
+        className={`fixed lg:absolute top-0 left-0 bottom-0 z-40 lg:z-30 border-r transition-all duration-300 flex flex-col ${
           isDark
-            ? 'bg-[#0B0D14]/55 border-[#2D3139]/80 shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
-            : 'bg-white/32 border-slate-200/90 shadow-2xl'
-        } ${isControlPanelOpen ? 'w-96' : 'w-10'}`}
+            ? 'bg-[#0B0D14]/90 border-[#2D3139]/80 shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
+            : 'bg-white/95 border-slate-200/90 shadow-2xl'
+        } ${isControlPanelOpen ? 'w-[88vw] sm:w-96 max-w-sm' : 'w-0 border-r-0 lg:w-10 lg:border-r'}`}
       >
         {/* Battery Pack Robotics Line Background Image with Frosted Glass Morphism Overlay */}
         <div className="absolute inset-0 pointer-events-none select-none z-0 overflow-hidden rounded-r-none">
@@ -1698,9 +2293,6 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             referrerPolicy="no-referrer"
             className="w-full h-full object-cover object-center scale-110 opacity-100 transition-all duration-500"
           />
-          {/* Light tint only — the battery line photo shows through the
-              negative space; the panels above carry their own glass card
-              styling so they still read clearly against it. */}
           <div
             className={`absolute inset-0 ${
               isDark
@@ -1711,12 +2303,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent dark:via-white/5 pointer-events-none" />
         </div>
 
-        {/* Toggle Button */}
+        {/* Toggle Button (Desktop & Tablet) */}
         <button
           onClick={() => setIsControlPanelOpen(!isControlPanelOpen)}
           title={isControlPanelOpen ? 'Collapse controller' : 'Expand controller'}
           aria-label={isControlPanelOpen ? 'Collapse controller' : 'Expand controller'}
-          className="absolute -right-4 top-5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white p-1.5 rounded-full border-2 border-white dark:border-[#0B0D14] shadow-[0_2px_10px_rgba(0,0,0,0.35)] z-40 transition-transform transform hover:scale-110"
+          className="hidden lg:flex absolute -right-4 top-5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white p-1.5 rounded-full border-2 border-white dark:border-[#0B0D14] shadow-[0_2px_10px_rgba(0,0,0,0.35)] z-40 transition-transform transform hover:scale-110"
         >
           {isControlPanelOpen ? <ChevronLeft className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
         </button>
@@ -1724,22 +2316,35 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         {isControlPanelOpen && (
           <div className="relative z-10 flex flex-col h-full overflow-hidden">
             {/* Control Panel Header with Frosted Glass styling */}
-            {/* Title and badge stack vertically, and the row keeps clear of the
-                right edge, so the collapse button is never sat on. */}
-            <div className={`p-4 pr-8 border-b backdrop-blur-xl ${
+            <div className={`p-4 border-b backdrop-blur-xl ${
               isDark ? 'border-white/10 bg-black/20' : 'border-slate-200/80 bg-white/40'
             }`}>
-              <div className={`flex items-center gap-2 font-extrabold uppercase text-xs tracking-wider ${
-                isDark ? 'text-white' : 'text-slate-900'
-              }`}>
-                <div className="p-1 rounded-lg bg-blue-500/20 border border-blue-400/30 text-blue-400 shrink-0">
-                  <Sliders className="w-4 h-4" />
+              <div className="flex items-center justify-between">
+                <div className={`flex items-center gap-2 font-extrabold uppercase text-xs tracking-wider ${
+                  isDark ? 'text-white' : 'text-slate-900'
+                }`}>
+                  <div className="p-1 rounded-lg bg-blue-500/20 border border-blue-400/30 text-blue-400 shrink-0">
+                    <Sliders className="w-4 h-4" />
+                  </div>
+                  <span className="leading-tight">Plant Controller</span>
                 </div>
-                <span className="leading-tight">Plant Operations Controller</span>
+                {/* Close Button for Mobile & Desktop */}
+                <button
+                  onClick={() => setIsControlPanelOpen(false)}
+                  className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-white/10 transition"
+                  title="Close panel"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
-              <span className="inline-block mt-2 ml-8 text-[10px] font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold backdrop-blur-md">
-                Auto-Scaling
-              </span>
+              <div className="flex items-center gap-2 mt-2">
+                <span className="text-[10px] font-mono text-emerald-600 dark:text-emerald-400 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30 font-bold backdrop-blur-md">
+                  Auto-Scaling Active
+                </span>
+                <span className="text-[10px] font-mono text-cyan-600 dark:text-cyan-400 bg-cyan-500/15 px-2 py-0.5 rounded-full border border-cyan-500/30 font-bold backdrop-blur-md">
+                  Takt: {requiredLineTakt}s
+                </span>
+              </div>
             </div>
 
             {/* Navigation Tabs - Frosted Glass Bar */}
@@ -2147,9 +2752,10 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                 </div>
               )}
 
-              {/* TAB 4: TIME ENGINE */}
+              {/* TAB 4: TIME ENGINE & PRIMING */}
               {activeControlTab === 'engine' && (
                 <div className="space-y-3.5 text-xs">
+                  {/* Shift Clock & Execution Controls */}
                   <div className="flex gap-2">
                     <button
                       onClick={() => {
@@ -2191,6 +2797,73 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
                     </button>
                   </div>
 
+                  {/* Priming Line Mode & Playable Controls */}
+                  <div className={`p-3 rounded-xl border space-y-2.5 backdrop-blur-xl ${
+                    isDark ? 'bg-[#141720]/45 border-white/10' : 'bg-slate-50/70 border-slate-200'
+                  }`}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold uppercase tracking-wider text-[10px] text-cyan-400 flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5" />
+                        Line Priming Mode
+                      </span>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold font-mono ${
+                        isLinePrimedState
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                          : 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/40 animate-pulse'
+                      }`}>
+                        {isLinePrimedState ? 'Primed (Steady-State)' : 'Cold Priming'}
+                      </span>
+                    </div>
+
+                    <p className="text-[11px] text-gray-400 leading-tight">
+                      Choose whether to start right away from an already-primed {requiredLineTakt}s cadence line, or simulate pipeline fill.
+                    </p>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        onClick={handleSetSteadyState}
+                        className={`py-2 px-2.5 rounded-xl font-bold text-[11px] transition-all flex flex-col items-center justify-center gap-1 border ${
+                          isLinePrimedState
+                            ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white border-emerald-400/40 shadow-[0_0_12px_rgba(16,185,129,0.35)]'
+                            : isDark
+                            ? 'bg-white/5 border-white/10 text-gray-300 hover:bg-white/10'
+                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1">🚀 Steady-State</span>
+                        <span className="text-[9px] font-normal font-mono opacity-85">{requiredLineTakt}s Cadence</span>
+                      </button>
+
+                      <button
+                        onClick={handleStartColdPriming}
+                        className={`py-2 px-2.5 rounded-xl font-bold text-[11px] transition-all flex flex-col items-center justify-center gap-1 border ${
+                          !isLinePrimedState
+                            ? 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white border-cyan-400/40 shadow-[0_0_12px_rgba(6,182,212,0.35)]'
+                            : isDark
+                            ? 'bg-white/5 border-white/10 text-gray-300 hover:bg-white/10'
+                            : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1">⏱️ Cold Priming</span>
+                        <span className="text-[9px] font-normal font-mono opacity-85">~{(dynamicPrimingTimeSec / 60).toFixed(0)}m Lead Time</span>
+                      </button>
+                    </div>
+
+                    <div className="pt-2 border-t border-white/5 space-y-1 font-mono text-[10px] text-gray-400">
+                      <div className="flex justify-between">
+                        <span>Dynamic Priming Lead:</span>
+                        <span className="text-cyan-400 font-bold">{(dynamicPrimingTimeSec / 60).toFixed(0)} min ({dynamicPrimingTimeSec}s)</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Outbound W04 Dispatch:</span>
+                        <span className={`font-bold ${isLinePrimedState ? 'text-emerald-400' : 'text-amber-400'}`}>
+                          {isLinePrimedState ? 'Gated & Flowing' : 'Strictly Gated'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Warp Speed */}
                   <div className="space-y-2">
                     <div className="text-[10px] text-gray-400 uppercase font-bold">Simulation Warp Speed</div>
                     <div className="grid grid-cols-4 gap-1.5 font-mono">
@@ -2241,79 +2914,192 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
         {/* Top Floating HUD Bar - Frosted Glassmorphism with Shadow Glow */}
         {/* left offset tracks the controller drawer — `left-14` only cleared the
             collapsed rail, so the open drawer sat on top of the HUD. */}
-        <div className={`absolute top-4 right-4 z-20 flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 rounded-2xl border text-xs backdrop-blur-2xl transition-all duration-300 ${
-          isControlPanelOpen ? 'left-[25rem]' : 'left-14'
+        <div className={`absolute top-4 right-4 z-20 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2.5 px-3.5 py-2.5 rounded-2xl border text-xs backdrop-blur-2xl transition-all duration-300 ${
+          isControlPanelOpen ? 'left-[25rem]' : 'left-4 sm:left-14'
         } ${
           isDark
-            ? 'bg-[#0B0D14]/55 text-white border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]'
-            : 'bg-white/60 text-slate-900 border-slate-200/90 shadow-[0_8px_24px_rgba(0,0,0,0.06)]'
+            ? 'bg-[#0B0D14]/75 text-white border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]'
+            : 'bg-white/80 text-slate-900 border-slate-200/90 shadow-[0_8px_24px_rgba(0,0,0,0.06)]'
         }`}>
-          <div className="flex items-center gap-4 font-mono">
-            <div>
-              <span className="text-[10px] text-gray-400 uppercase block font-semibold">Shift Target</span>
-              <span className="font-bold text-amber-500 drop-shadow-xs">{shiftPacksReq.toLocaleString()} Packs</span>
+          <div className="flex items-center justify-between gap-3">
+            {/* Core Target Metrics (Always visible or expanded) */}
+            <div className="flex items-center gap-3 sm:gap-4 font-mono flex-wrap">
+              <div>
+                <span className="text-[9px] sm:text-[10px] text-gray-400 uppercase block font-semibold">Shift Target</span>
+                <span className="font-bold text-amber-500 drop-shadow-xs text-xs sm:text-sm">{shiftPacksReq.toLocaleString()} Pk</span>
+              </div>
+              <div className="w-[1px] h-5 bg-gray-300 dark:bg-white/10" />
+              <div>
+                <span className="text-[9px] sm:text-[10px] text-gray-400 uppercase block font-semibold">Req. Takt</span>
+                <span className="font-bold text-emerald-500 drop-shadow-xs text-xs sm:text-sm">{requiredLineTakt}s</span>
+              </div>
+              <div className="w-[1px] h-5 bg-gray-300 dark:bg-white/10 hidden sm:block" />
+              <div className="hidden sm:block">
+                <span className="text-[9px] sm:text-[10px] text-gray-400 uppercase block font-semibold">Active Threads</span>
+                <span className="font-bold text-blue-500 text-xs sm:text-sm">
+                  {tStack} Stack • {tWeld} Weld • {tCycler} Cycle
+                </span>
+              </div>
             </div>
-            <div className="w-[1px] h-6 bg-gray-300 dark:bg-white/10" />
-            <div>
-              <span className="text-[10px] text-gray-400 uppercase block font-semibold">Req. Line Takt</span>
-              <span className="font-bold text-emerald-500 drop-shadow-xs">{requiredLineTakt}s / Pack</span>
-            </div>
-            <div className="w-[1px] h-6 bg-gray-300 dark:bg-white/10" />
-            <div>
-              <span className="text-[10px] text-gray-400 uppercase block font-semibold">Active Threads</span>
-              <span className="font-bold text-blue-500">
-                {tStack} Stackers • {tWeld} Welders • {tCycler} Cyclers
-              </span>
-            </div>
-          </div>
 
-          {/* Color Particles Legend & Layout Lock Status */}
-          <div className="flex items-center gap-3 text-[10px] font-mono flex-wrap">
-            {/* Lock / Unlock Station Rearrangement Toggle Button */}
+            {/* Mobile Toggle Button */}
             <button
-              onClick={toggleLayoutLock}
-              className={`flex items-center gap-1.5 px-3 py-1 rounded-xl text-xs font-bold transition-all select-none backdrop-blur-xl ${
-                isLayoutLocked
-                  ? isDark
-                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/25 shadow-[0_0_10px_rgba(16,185,129,0.15)]'
-                    : 'bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 shadow-xs'
-                  : isDark
-                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/60 hover:bg-amber-500/30 animate-pulse'
-                  : 'bg-amber-100 text-amber-900 border border-amber-400 hover:bg-amber-200 animate-pulse'
-              }`}
-              title={isLayoutLocked ? 'Layout is Locked: Click to Unlock Drag & Drop Station Rearrangement' : 'Layout is in Edit Mode: Click to Lock & Protect Positions'}
+              onClick={() => setIsHudExpanded(!isHudExpanded)}
+              className="md:hidden p-1.5 rounded-lg bg-black/5 dark:bg-white/5 border border-black/10 dark:border-white/10 text-gray-400 hover:text-white"
+              title={isHudExpanded ? 'Collapse Legend & Controls' : 'Expand Controls & Legend'}
             >
-              {isLayoutLocked ? (
-                <>
-                  <Lock className="w-3.5 h-3.5 text-emerald-500" />
-                  <span>Layout Locked</span>
-                </>
-              ) : (
-                <>
-                  <Unlock className="w-3.5 h-3.5 text-amber-500" />
-                  <span>Edit Layout Active</span>
-                </>
-              )}
+              {isHudExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
             </button>
-
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500" />
-              <span>Raw Cells</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shadow-sm shadow-amber-500" />
-              <span>Cell Stacks</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-sm shadow-orange-500" />
-              <span>EV Packs</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-full bg-sky-500 shadow-sm shadow-sky-500" />
-              <span>BESS Racks</span>
-            </div>
           </div>
+
+          {/* Color Particles Legend & Layout Lock Status (Responsive / Collapsible on Mobile) */}
+          {(isHudExpanded || (typeof window !== 'undefined' && window.innerWidth >= 768)) && (
+            <div className="flex items-center gap-3 text-[10px] font-mono flex-wrap pt-1.5 md:pt-0 border-t md:border-t-0 border-black/5 dark:border-white/5">
+              {/* Lock / Unlock Station Rearrangement Toggle Button */}
+              <button
+                onClick={toggleLayoutLock}
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-xl text-xs font-bold transition-all select-none backdrop-blur-xl ${
+                  isLayoutLocked
+                    ? isDark
+                      ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/25 shadow-[0_0_10px_rgba(16,185,129,0.15)]'
+                      : 'bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100 shadow-xs'
+                    : isDark
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/60 hover:bg-amber-500/30 animate-pulse'
+                    : 'bg-amber-100 text-amber-900 border border-amber-400 hover:bg-amber-200 animate-pulse'
+                }`}
+                title={isLayoutLocked ? 'Layout is Locked: Click to Unlock Drag & Drop Station Rearrangement' : 'Layout is in Edit Mode: Click to Lock & Protect Positions'}
+              >
+                {isLayoutLocked ? (
+                  <>
+                    <Lock className="w-3.5 h-3.5 text-emerald-500" />
+                    <span className="hidden sm:inline">Layout Locked</span>
+                    <span className="sm:hidden">Locked</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-3.5 h-3.5 text-amber-500" />
+                    <span className="hidden sm:inline">Edit Layout Active</span>
+                    <span className="sm:hidden">Editing</span>
+                  </>
+                )}
+              </button>
+
+              <div className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500" />
+                <span>Raw Cells</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shadow-sm shadow-amber-500" />
+                <span>Cell Stacks</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-sm shadow-orange-500" />
+                <span>EV Packs</span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-sky-500 shadow-sm shadow-sky-500" />
+                <span>BESS Racks</span>
+              </div>
+            </div>
+          )}
         </div>
+
+        {/* Floating Mobile Open Controller Button */}
+        {!isControlPanelOpen && (
+          <button
+            onClick={() => setIsControlPanelOpen(true)}
+            className="lg:hidden absolute left-3 top-3 z-30 p-2.5 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-xl border border-white/20 active:scale-95 transition-transform"
+            title="Open Plant Controller"
+            aria-label="Open Plant Controller"
+          >
+            <Sliders className="w-4 h-4" />
+          </button>
+        )}
+
+        {/* Live Line Pipeline & First-Pack Build Progression Tracker (Collapsible HUD) */}
+        {!isLinePrimedState && (
+          <div className={`absolute top-20 z-20 transition-all duration-300 select-none ${
+            isControlPanelOpen ? 'left-[25rem]' : 'left-3 sm:left-14'
+          } ${
+            isDark
+              ? 'bg-[#0B0D14]/90 text-white border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.5)]'
+              : 'bg-white/95 text-slate-900 border-slate-200/90 shadow-[0_8px_24px_rgba(0,0,0,0.1)]'
+          } rounded-2xl border backdrop-blur-2xl ${
+            isPipelineHudExpanded ? 'w-[92vw] sm:w-96 max-w-md p-3.5' : 'w-auto px-3 py-2'
+          }`}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="relative flex h-2.5 w-2.5 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500"></span>
+                </span>
+                <span className="font-bold text-[11px] uppercase tracking-wider text-cyan-400 truncate">
+                  {isPipelineHudExpanded ? 'Priming Pipeline (Cold-Start)' : 'Priming: Pipeline Fill'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-mono font-bold text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20 text-[10px]">
+                  {Math.min(100, Math.round((simState.shiftTimeSeconds / Math.max(1, dynamicPrimingTimeSec)) * 100))}%
+                </span>
+                <button
+                  onClick={() => setIsPipelineHudExpanded(!isPipelineHudExpanded)}
+                  className={`p-1 rounded-md text-[10px] transition-all ${
+                    isDark ? 'hover:bg-white/10 text-gray-300' : 'hover:bg-slate-200 text-slate-600'
+                  }`}
+                  title={isPipelineHudExpanded ? 'Collapse HUD' : 'Expand Details'}
+                >
+                  {isPipelineHudExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+            </div>
+
+            {isPipelineHudExpanded && (
+              <div className="space-y-2.5 mt-2 pt-2 border-t border-white/5 dark:border-white/10">
+                {/* Progress bar */}
+                <div className="w-full bg-gray-700/30 rounded-full h-2 overflow-hidden border border-white/5">
+                  <div
+                    className="bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500 h-2 rounded-full transition-all duration-300 shadow-[0_0_10px_rgba(6,182,212,0.5)]"
+                    style={{ width: `${Math.min(100, Math.max(4, (simState.shiftTimeSeconds / Math.max(1, dynamicPrimingTimeSec)) * 100))}%` }}
+                  />
+                </div>
+
+                {/* Current Active Pipeline Stage */}
+                <div className={`p-2 rounded-xl text-[11px] font-mono flex items-center justify-between ${
+                  isDark ? 'bg-white/5 border border-white/5' : 'bg-slate-50 border border-slate-200'
+                }`}>
+                  <span className="text-gray-400">Active Process:</span>
+                  <span className="font-semibold text-emerald-400 text-right truncate max-w-[220px]">
+                    {simState.shiftTimeSeconds < dynamicPrimingTimeSec * 0.15
+                      ? 'Inbound AGVs & OCV/IR Sort'
+                      : simState.shiftTimeSeconds < dynamicPrimingTimeSec * 0.35
+                      ? 'Prismatic Stacking & 2K Adhesive'
+                      : simState.shiftTimeSeconds < dynamicPrimingTimeSec * 0.55
+                      ? '3kW Fiber Laser Welding & CCD'
+                      : simState.shiftTimeSeconds < dynamicPrimingTimeSec * 0.75
+                      ? 'Marriage with Enclosure, TIM & BMS'
+                      : simState.shiftTimeSeconds < dynamicPrimingTimeSec * 0.90
+                      ? 'Cover Torque Sealing & Hipot Test'
+                      : 'EOL Cycler Aging & Quality Release'}
+                  </span>
+                </div>
+
+                <div className="flex items-center justify-between text-[10px] text-gray-400 font-mono pt-0.5">
+                  <span>Elapsed: <strong className={isDark ? 'text-white' : 'text-slate-900'}>{formatShiftTime(simState.shiftTimeSeconds)}</strong></span>
+                  <span>Lead Time: <strong className="text-cyan-400">~{(dynamicPrimingTimeSec / 60).toFixed(0)} min</strong></span>
+                </div>
+
+                {/* Quick Playable Action to Jump to Steady-State */}
+                <button
+                  onClick={handleSetSteadyState}
+                  className="w-full py-1.5 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] flex items-center justify-center gap-1.5 shadow-sm transition-all"
+                >
+                  <span>⚡ Instant Prime & Run at {requiredLineTakt}s Cadence</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Canvas Element */}
         <canvas
@@ -2323,7 +3109,11 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
           onWheel={handleWheel}
-          className={`relative z-10 w-full h-full block ${
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          onTouchCancel={handleTouchEnd}
+          className={`relative z-10 w-full h-full block touch-none ${
             isNodeDragging
               ? 'cursor-grabbing'
               : hoveredNodeId
@@ -2345,46 +3135,59 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
 
         {/* Bottom Right Floating Camera & Display Controls */}
         <div className="absolute bottom-4 right-4 z-20 flex flex-col gap-2">
-          <div className={`backdrop-blur-md p-1.5 rounded-lg border flex flex-col gap-1 ${
-            isDark ? 'bg-[#111318]/90 border-[#2D3139] text-gray-300' : 'bg-white/90 border-slate-200 text-slate-700 shadow-sm'
+          <div className={`backdrop-blur-md p-1.5 rounded-xl border flex flex-col gap-1.5 shadow-lg ${
+            isDark ? 'bg-[#111318]/90 border-[#2D3139] text-gray-300' : 'bg-white/90 border-slate-200 text-slate-700 shadow-md'
           }`}>
             <button
               onClick={toggleLayoutLock}
-              className={`p-1.5 rounded transition-all ${
+              className={`p-2 rounded-lg transition-all flex items-center justify-center ${
                 isLayoutLocked
                   ? 'text-emerald-500 hover:bg-emerald-500/15'
                   : 'text-amber-400 bg-amber-500/20 hover:bg-amber-500/30 animate-pulse'
               }`}
               title={isLayoutLocked ? 'Layout is Locked: Click to Unlock Drag & Drop' : 'Layout is in Edit Mode: Click to Lock'}
+              aria-label="Toggle Layout Lock"
             >
               {isLayoutLocked ? <Lock className="w-4 h-4 text-emerald-500" /> : <Unlock className="w-4 h-4 text-amber-500" />}
             </button>
             <button
-              onClick={() => setCamera(prev => ({ ...prev, scale: Math.min(2.5, prev.scale * 1.2) }))}
-              className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all"
+              onClick={() => setCamera(prev => ({ ...prev, scale: Math.min(2.5, prev.scale * 1.25) }))}
+              className="p-2 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all flex items-center justify-center"
               title="Zoom In"
+              aria-label="Zoom In"
             >
               <ZoomIn className="w-4 h-4" />
             </button>
             <button
-              onClick={() => setCamera(prev => ({ ...prev, scale: Math.max(0.2, prev.scale / 1.2) }))}
-              className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all"
+              onClick={() => setCamera(prev => ({ ...prev, scale: Math.max(0.2, prev.scale / 1.25) }))}
+              className="p-2 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all flex items-center justify-center"
               title="Zoom Out"
+              aria-label="Zoom Out"
             >
               <ZoomOut className="w-4 h-4" />
             </button>
-            <button onClick={handleResetCamera} className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all" title="Fit Camera View">
+            <button
+              onClick={handleResetCamera}
+              className="p-2 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg transition-all flex items-center justify-center"
+              title="Fit Plant Floor View"
+              aria-label="Fit Plant Floor View"
+            >
               <Maximize2 className="w-4 h-4" />
             </button>
-            <button onClick={handleResetLayout} className="p-1.5 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg text-amber-500 hover:text-amber-400 transition-all" title="Reset Floor Layout to Default Blueprint">
+            <button
+              onClick={handleResetLayout}
+              className="p-2 hover:bg-white/10 dark:hover:bg-white/10 rounded-lg text-amber-500 hover:text-amber-400 transition-all flex items-center justify-center"
+              title="Reset Floor Layout to Default Blueprint"
+              aria-label="Reset Floor Layout to Default Blueprint"
+            >
               <RotateCcw className="w-4 h-4" />
             </button>
           </div>
 
           <div className={`backdrop-blur-2xl p-2.5 rounded-2xl border flex flex-col gap-1.5 text-[10px] shadow-lg transition-all ${
-            isDark ? 'bg-[#0B0D14]/55 border-white/10 text-gray-300' : 'bg-white/60 border-slate-200/90 text-slate-700 shadow-sm'
+            isDark ? 'bg-[#0B0D14]/75 border-white/10 text-gray-300' : 'bg-white/80 border-slate-200/90 text-slate-700 shadow-sm'
           }`}>
-            <label className="flex items-center gap-1.5 cursor-pointer">
+            <label className="flex items-center gap-1.5 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={showGrid}
@@ -2393,7 +3196,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               />
               <span>Grid</span>
             </label>
-            <label className="flex items-center gap-1.5 cursor-pointer">
+            <label className="flex items-center gap-1.5 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={showParticles}
@@ -2402,7 +3205,7 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               />
               <span>Particles</span>
             </label>
-            <label className="flex items-center gap-1.5 cursor-pointer">
+            <label className="flex items-center gap-1.5 cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={showTrucks}
@@ -2414,12 +3217,12 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
           </div>
         </div>
 
-        {/* Selected Node Inspector Drawer - Frosted Glassmorphism Card */}
+        {/* Selected Node Inspector Drawer - Responsive Glassmorphism Card */}
         {selectedNode && (
-          <div className={`absolute bottom-4 left-14 z-20 w-84 p-4 rounded-2xl border space-y-3 text-xs backdrop-blur-2xl transition-all ${
+          <div className={`fixed lg:absolute bottom-3 left-3 right-3 lg:right-auto lg:left-14 lg:w-84 max-h-[55vh] overflow-y-auto z-30 p-4 rounded-2xl border space-y-3 text-xs backdrop-blur-2xl transition-all shadow-2xl ${
             isDark
-              ? 'bg-[#0B0D14]/85 border-white/10 text-white shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
-              : 'bg-white/90 border-slate-200/90 text-slate-900 shadow-2xl'
+              ? 'bg-[#0B0D14]/90 border-white/10 text-white shadow-[0_8px_32px_rgba(0,0,0,0.6)]'
+              : 'bg-white/95 border-slate-200/90 text-slate-900 shadow-2xl'
           }`}>
             <div className={`flex justify-between items-center border-b pb-2 ${
               isDark ? 'border-white/10' : 'border-[#E7E3DC]'
@@ -2525,6 +3328,23 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
               </div>
             </div>
 
+            {selectedNode.type === 'M' && (
+              <div className={`p-2.5 rounded-xl border space-y-1.5 font-mono text-[11px] backdrop-blur-xl ${
+                isDark ? 'bg-[#141720]/32 border-white/10' : 'bg-slate-50/55 border-slate-200'
+              }`}>
+                <div className="flex justify-between items-center">
+                  <span className="text-[9px] text-gray-400 uppercase font-semibold">Production Cycle Counter</span>
+                  <span className="font-bold text-blue-500 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
+                    {(selectedNode.cycleCount || 0).toLocaleString()} cycles
+                  </span>
+                </div>
+                <div className="flex justify-between text-[10px] text-gray-500 dark:text-gray-400">
+                  <span>Sequence Tracking:</span>
+                  <span className="text-emerald-500 font-semibold">Active & Sequential</span>
+                </div>
+              </div>
+            )}
+
             {selectedNode.id === 'B_BESS_Buf' && (
               <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-[10px] text-amber-400 leading-tight backdrop-blur-xl">
                 <strong>BESS Input Buffer Bank:</strong> Dedicated supply line from Pack Marriage Robot M01. Maintains minimum 20 Battery Packs buffer reserve before BESS rack assembly.
@@ -2534,6 +3354,18 @@ export const PlantLayout2D: React.FC<PlantLayout2DProps> = ({
             {selectedNode.id === 'M01' && (
               <div className="p-2.5 rounded-xl bg-blue-500/15 border border-blue-500/30 text-[10px] text-blue-400 leading-tight backdrop-blur-xl">
                 <strong>Pack Marriage Robot:</strong> Marries module stacks (from B04) and trays (from TIM Dispenser P02). Distributes finished married packs to EV Line (M02) and BESS Buffer Bank (B_BESS_Buf).
+              </div>
+            )}
+
+            {selectedNode.id === 'Q_Bay' && (
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/30 text-[10px] text-rose-400 leading-tight backdrop-blur-xl">
+                <strong>Defect Cell Reject Bay (Q-Bay):</strong> Screened reject bay receiving defect cells from OCV Sort Gateway (C_Sort) under normative yield/defect screening. Isolated for teardown analysis.
+              </div>
+            )}
+
+            {selectedNode.id === 'Q_Bead_Reject' && (
+              <div className="p-2.5 rounded-xl bg-orange-500/15 border border-orange-500/30 text-[10px] text-orange-400 leading-tight backdrop-blur-xl">
+                <strong>Weld Bead Reject Quarantine:</strong> Screened reject station receiving laser busbar weld defect cell stacks from CCD Vision Gateway (CCD_Sort).
               </div>
             )}
 

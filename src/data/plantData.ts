@@ -71,16 +71,16 @@ export const PROCESS_ZONES: ProcessZone[] = [
   },
   {
     id: 'z3',
-    name: 'Stack Build, Pressing & Fire Protection',
+    name: 'Stack Build, 2K Adhesive Application & Pressing',
     wbsCode: 'Z3',
-    description: 'Six-axis tape application, prismatic cell stacking, 30kN hydraulic compression, pressure verification, and Aerogel fire retardant application.',
+    description: 'Six-axis 2K structural adhesive dispensing robot (ambient chemical cure), 48-cell prismatic stacking, 30kN hydraulic compression, pressure verification, and Aerogel fire retardant application.',
     machineUnitsCount: 22,
     totalCostUSD: 769000,
     shiftCrewDirect: 4,
     color: '#8B5CF6', // Purple
     machines: [
-      { id: 'C.1.3.1', wbsCode: 'C.1.3.1', name: 'Cell Adhesion Tape Manipulator', description: 'Six axis robot applying structural adhesive tape', cycleTimeSec: 105, machinesCount: 4, unitRateUSD: 20000, totalCostUSD: 80000, status: 'running', utilizationPct: 87 },
-      { id: 'C.1.3.2', wbsCode: 'C.1.3.2', name: 'Cell Stacking Machine', description: 'Prismatic cell stacking at 50 groups per hour', cycleTimeSec: 90, machinesCount: 4, unitRateUSD: 120000, totalCostUSD: 480000, status: 'running', utilizationPct: 95 },
+      { id: 'C.1.3.1', wbsCode: 'C.1.3.1', name: 'Prismatic Cell Stacking Machine', description: 'Prismatic cell stacking at 50 groups per hour', cycleTimeSec: 90, machinesCount: 4, unitRateUSD: 120000, totalCostUSD: 480000, status: 'running', utilizationPct: 95 },
+      { id: 'C.1.3.2', wbsCode: 'C.1.3.2', name: '2K Cell Structural Adhesive Dispenser', description: 'Six axis robot applying two-component (2K) structural adhesive with dynamic mixing head (room-temperature chemical cure)', cycleTimeSec: 105, machinesCount: 4, unitRateUSD: 20000, totalCostUSD: 80000, status: 'running', utilizationPct: 87 },
       { id: 'C.1.3.3', wbsCode: 'C.1.3.3', name: 'Cell Stack Pressing Machine', description: 'Hydraulic press, 30 kN stack compression', cycleTimeSec: 62, machinesCount: 3, unitRateUSD: 7000, totalCostUSD: 21000, status: 'running', utilizationPct: 82 },
       { id: 'C.1.3.4', wbsCode: 'C.1.3.4', name: 'Cell Stack Pressure Test Gauge', description: 'Digital verification of stack compression force', cycleTimeSec: 45, machinesCount: 2, unitRateUSD: 40000, totalCostUSD: 80000, status: 'running', utilizationPct: 84 },
       { id: 'C.1.3.5', wbsCode: 'C.1.3.5', name: 'Fire Retardant Application', description: 'Aerogel barrier and retardant spray applicator', cycleTimeSec: 216, machinesCount: 9, unitRateUSD: 12000, totalCostUSD: 108000, status: 'running', utilizationPct: 90 },
@@ -116,10 +116,11 @@ export const PROCESS_ZONES: ProcessZone[] = [
       { id: 'C.1.5.3', wbsCode: 'C.1.5.3', name: 'Cooling Plate Sub-Assembly', description: 'Extruded aluminium plate and glycol manifold fitting', cycleTimeSec: 30, machinesCount: 2, unitRateUSD: 55000, totalCostUSD: 110000, status: 'running', utilizationPct: 87 },
       { id: 'C.1.5.4', wbsCode: 'C.1.5.4', name: 'Thermal Interface Material Dispenser', description: 'Precision dispensing of thermal interface material', cycleTimeSec: 43, machinesCount: 2, unitRateUSD: 35000, totalCostUSD: 70000, status: 'running', utilizationPct: 89 },
       { id: 'C.1.5.5', wbsCode: 'C.1.5.5', name: 'Laser Profilometer (Bond Line)', description: 'Laser displacement verification of the bond line', cycleTimeSec: 12, machinesCount: 1, unitRateUSD: 45000, totalCostUSD: 45000, status: 'running', utilizationPct: 85 },
-      { id: 'C.1.5.6', wbsCode: 'C.1.5.6', name: 'PU Gun IP67 Template Fixture', description: 'Two component foam in place gasket application', cycleTimeSec: 240, machinesCount: 10, unitRateUSD: 8000, totalCostUSD: 80000, status: 'running', utilizationPct: 91 },
-      { id: 'C.1.5.7', wbsCode: 'C.1.5.7', name: 'Adhesive Curing Tunnel', description: 'Offline batch cure; 50 pack positions per tunnel', cycleTimeSec: 3600, machinesCount: 3, packsPerCycle: 50, unitRateUSD: 120000, totalCostUSD: 360000, status: 'running', utilizationPct: 93 },
-      { id: 'C.1.5.8', wbsCode: 'C.1.5.8', name: 'Cover Sealing Torque Assembly', description: 'Direct current nutrunner sealing to controlled torque', cycleTimeSec: 30, machinesCount: 2, unitRateUSD: 13500, totalCostUSD: 27000, status: 'running', utilizationPct: 86 },
-      { id: 'C.1.5.9', wbsCode: 'C.1.5.9', name: 'Cell-to-Pack Heavy Duty Robot', description: 'Heavy duty robot inserting cell stacks into the tray', cycleTimeSec: 300, machinesCount: 12, unitRateUSD: 35000, totalCostUSD: 420000, status: 'running', utilizationPct: 92 },
+      { id: 'C.1.5.6', wbsCode: 'C.1.5.6', name: 'Pack Marriage Heavy Duty Robot', description: 'Heavy duty robot inserting cell stacks into the prepared tray', cycleTimeSec: 300, machinesCount: 12, unitRateUSD: 35000, totalCostUSD: 420000, status: 'running', utilizationPct: 92 },
+      { id: 'C.1.5.7', wbsCode: 'C.1.5.7', name: 'Structural Fastening Cell', description: 'Automated torque fastening of module frame to tray chassis', cycleTimeSec: 40, machinesCount: 2, unitRateUSD: 20000, totalCostUSD: 40000, status: 'running', utilizationPct: 88 },
+      { id: 'C.1.5.8', wbsCode: 'C.1.5.8', name: '2K PU Foam-In-Place IP67 Gasket Dispenser', description: 'Two-component (2K) automated meter-mix foam in place gasket application (chemical reactive cure)', cycleTimeSec: 240, machinesCount: 10, unitRateUSD: 8000, totalCostUSD: 80000, status: 'running', utilizationPct: 91 },
+      { id: 'C.1.5.9', wbsCode: 'C.1.5.9', name: '2K Adhesive Room-Temp Cure Dwell Buffer', description: 'Ambient temperature buffer for two-component chemical cure reaction; 50 pack positions', cycleTimeSec: 3600, machinesCount: 3, packsPerCycle: 50, unitRateUSD: 120000, totalCostUSD: 360000, status: 'running', utilizationPct: 93 },
+      { id: 'C.1.5.10', wbsCode: 'C.1.5.10', name: 'Cover Sealing Torque Assembly', description: 'Direct current nutrunner sealing to controlled torque', cycleTimeSec: 30, machinesCount: 2, unitRateUSD: 13500, totalCostUSD: 27000, status: 'running', utilizationPct: 86 },
     ]
   },
   {
@@ -217,7 +218,7 @@ export const WAREHOUSES: WarehouseInfo[] = [
     type: 'non_live_material',
     capacityUnits: 45000, // Pallet positions for non-live components
     currentStockPct: 84,
-    description: 'Dedicated warehouse for non-live production components: composite housings, cooling plates, busbars, structural adhesives, BMS boards, wiring harnesses, screws, and export crating.',
+    description: 'Dedicated warehouse for non-live production components: composite housings, cooling plates, busbars, 2K structural polyurethane/epoxy adhesives (A/B), BMS boards, wiring harnesses, screws, and export crating.',
     rackingCostUSD: 650000,
     mheAssigned: ['4 Electric Counterbalance Forklifts', '10 Pallet Stacker Trolleys'],
     safetyRating: 'Standard Industrial ESD',

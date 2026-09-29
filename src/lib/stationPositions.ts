@@ -49,9 +49,38 @@ export interface UseStationPositionsResult {
   resetAll: (actorEmail: string) => Promise<void>;
 }
 
+const LOCAL_POSITIONS_KEY = 'radi_twin_station_positions';
+
+function getLocalPositions(): StationPositionMap {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(LOCAL_POSITIONS_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // Ignore storage parse error
+  }
+  return {};
+}
+
+function saveLocalPositions(map: StationPositionMap) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(LOCAL_POSITIONS_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage quota error
+  }
+}
+
+let isStationPositionsTableAvailable: boolean | null = null;
+
 export function useStationPositions(): UseStationPositionsResult {
-  const [positions, setPositions] = useState<StationPositionMap>({});
-  const [loading, setLoading] = useState(true);
+  const [positions, setPositions] = useState<StationPositionMap>(() => {
+    if (!isSupabaseConfigured) {
+      return getLocalPositions();
+    }
+    return {};
+  });
+  const [loading, setLoading] = useState(!isSupabaseConfigured ? false : true);
   const [error, setError] = useState<string | null>(null);
 
   // Echo suppression. Our own write comes back through the realtime channel a
@@ -63,26 +92,62 @@ export function useStationPositions(): UseStationPositionsResult {
     let active = true;
 
     if (!isSupabaseConfigured) {
-      setError(SUPABASE_CONFIG_ERROR);
+      setPositions(getLocalPositions());
       setLoading(false);
+      setError(null);
+      // Synchronize with embedded server database
+      fetch('/api/db/station_positions')
+        .then(res => res.json())
+        .then(json => {
+          if (!active) return;
+          if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+            const map: StationPositionMap = {};
+            for (const row of json.data) {
+              const p = fromRow(row);
+              map[p.id] = { x: p.x, y: p.y };
+            }
+            setPositions(prev => ({ ...prev, ...map }));
+            saveLocalPositions(map);
+          }
+        })
+        .catch(() => {});
       return;
     }
 
     (async () => {
-      const { data, error: fetchError } = await supabase.from('station_positions').select('*');
-      if (!active) return;
-      if (fetchError) {
-        setError(fetchError.message);
-      } else {
-        setError(null);
-        const map: StationPositionMap = {};
-        for (const row of data ?? []) {
-          const p = fromRow(row);
-          map[p.id] = { x: p.x, y: p.y };
+      try {
+        const { data, error: fetchError } = await supabase.from('station_positions').select('*');
+        if (!active) return;
+        if (fetchError) {
+          if (
+            fetchError.message?.includes('Could not find the table') ||
+            fetchError.message?.includes('schema cache') ||
+            fetchError.code === '42P01' ||
+            fetchError.code === 'PGRST204'
+          ) {
+            isStationPositionsTableAvailable = false;
+          }
+          setPositions(getLocalPositions());
+          setError(null);
+        } else {
+          isStationPositionsTableAvailable = true;
+          setError(null);
+          const map: StationPositionMap = {};
+          for (const row of data ?? []) {
+            const p = fromRow(row);
+            map[p.id] = { x: p.x, y: p.y };
+          }
+          setPositions(map);
+          saveLocalPositions(map);
         }
-        setPositions(map);
+      } catch {
+        if (!active) return;
+        isStationPositionsTableAvailable = false;
+        setPositions(getLocalPositions());
+        setError(null);
+      } finally {
+        if (active) setLoading(false);
       }
-      setLoading(false);
     })();
 
     const channel = supabase
@@ -94,6 +159,7 @@ export function useStationPositions(): UseStationPositionsResult {
             if (!(deletedId in prev)) return prev;
             const next = { ...prev };
             delete next[deletedId];
+            saveLocalPositions(next);
             return next;
           }
           const p = fromRow(payload.new);
@@ -104,7 +170,9 @@ export function useStationPositions(): UseStationPositionsResult {
           }
           const current = prev[p.id];
           if (current && current.x === p.x && current.y === p.y) return prev;
-          return { ...prev, [p.id]: { x: p.x, y: p.y } };
+          const next = { ...prev, [p.id]: { x: p.x, y: p.y } };
+          saveLocalPositions(next);
+          return next;
         });
       })
       .subscribe();
@@ -119,17 +187,43 @@ export function useStationPositions(): UseStationPositionsResult {
     async (id: string, x: number, y: number, actorEmail: string, label: string) => {
       const rounded = { x: Math.round(x), y: Math.round(y) };
       ownWritesRef.current.set(id, Date.now());
-      setPositions(prev => ({ ...prev, [id]: rounded }));
+      setPositions(prev => {
+        const next = { ...prev, [id]: rounded };
+        saveLocalPositions(next);
+        return next;
+      });
 
-      const { error: upsertError } = await supabase
-        .from('station_positions')
-        .upsert({ id, x: rounded.x, y: rounded.y, updated_by: actorEmail });
+      // Persist to server db
+      fetch('/api/db/station_positions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, x: rounded.x, y: rounded.y, updated_by: actorEmail }),
+      }).catch(() => {});
 
-      if (upsertError) {
-        setError(upsertError.message);
-        throw upsertError;
+      if (isSupabaseConfigured && isStationPositionsTableAvailable !== false) {
+        try {
+          const { error: upsertError } = await supabase
+            .from('station_positions')
+            .upsert({ id, x: rounded.x, y: rounded.y, updated_by: actorEmail });
+
+          if (upsertError) {
+            if (
+              upsertError.message?.includes('Could not find the table') ||
+              upsertError.message?.includes('schema cache') ||
+              upsertError.code === '42P01' ||
+              upsertError.code === 'PGRST204'
+            ) {
+              isStationPositionsTableAvailable = false;
+            }
+            console.warn('[station_positions] Supabase save notice:', upsertError.message);
+          } else {
+            isStationPositionsTableAvailable = true;
+          }
+        } catch (err) {
+          isStationPositionsTableAvailable = false;
+          console.warn('[station_positions] Supabase upsert skipped, local stored.');
+        }
       }
-      setError(null);
 
       await recordAudit({
         actorEmail,
@@ -144,16 +238,21 @@ export function useStationPositions(): UseStationPositionsResult {
   );
 
   const resetAll = useCallback(async (actorEmail: string) => {
-    const { error: deleteError } = await supabase
-      .from('station_positions')
-      .delete()
-      // Postgrest refuses an unfiltered delete; this matches every row.
-      .not('id', 'is', null);
-    if (deleteError) {
-      setError(deleteError.message);
-      throw deleteError;
-    }
     setPositions({});
+    saveLocalPositions({});
+    if (isSupabaseConfigured) {
+      try {
+        const { error: deleteError } = await supabase
+          .from('station_positions')
+          .delete()
+          .not('id', 'is', null);
+        if (deleteError) {
+          console.warn('[station_positions] Supabase reset warning:', deleteError.message);
+        }
+      } catch (err) {
+        console.warn('[station_positions] Reset Supabase failed:', err);
+      }
+    }
     setError(null);
     await recordAudit({
       actorEmail,

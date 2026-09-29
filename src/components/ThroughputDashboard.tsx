@@ -146,7 +146,11 @@ export const ThroughputDashboard: React.FC<ThroughputDashboardProps> = ({
 
   // Calculate zone cycle times vs target takt (26.57s)
   const zoneTaktData = zones.map(z => {
-    const avgCycle = z.machines.reduce((acc, m) => acc + (m.cycleTimeSec / m.machinesCount), 0) / z.machines.length;
+    const totalEffectiveCycle = z.machines.reduce((acc, m) => {
+      const parallel = Math.max(1, m.machinesCount) * Math.max(1, m.packsPerCycle ?? 1);
+      return acc + (m.cycleTimeSec > 0 ? m.cycleTimeSec / parallel : 0);
+    }, 0);
+    const avgCycle = z.machines.length > 0 ? totalEffectiveCycle / z.machines.length : 0;
     const isBottleneck = avgCycle > 26.57 || z.machines.some(m => m.status === 'bottleneck');
     return {
       name: z.wbsCode,

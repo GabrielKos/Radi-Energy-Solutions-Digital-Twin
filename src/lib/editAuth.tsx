@@ -1,46 +1,30 @@
 import React, { useCallback, useState, useSyncExternalStore } from 'react';
-import { KeyRound, Lock, Mail, ShieldAlert, X } from 'lucide-react';
+import { Lock, Mail, User, ShieldAlert, X } from 'lucide-react';
 import { ThemeMode } from '../types/plant';
 import { diffFields, recordAudit, AuditAction, FieldChange } from './auditLog';
 
 /**
  * Engineering edit authorisation, and the identity behind the change trail.
  *
- * Every change written back to the shared database — adding, editing or
- * deleting a machine, warehouse, workforce line, tariff period or CapEx item,
- * and moving a station on the Floor Twin — raises a challenge for the
- * engineering password. The challenge is raised on *each* write, not once per
- * session, so an unattended control-room screen cannot be quietly edited by
- * whoever walks up to it next.
+ * Every change written back to the plant model — adding, editing or deleting a
+ * machine, warehouse, workforce line, tariff period or CapEx item, repositioning
+ * a station on the Floor Twin, or adding audit notes — requires the operator's
+ * Full Name, Work Email, and Engineering Password.
  *
- * The dialog also asks who is making the change. The email is remembered per
- * browser so it is typed once and pre-filled thereafter, while the password is
- * still required every time — identity is a convenience, authorisation is not.
- *
- * ── Scope, stated plainly ─────────────────────────────────────────────────
- * This is an operational guard against accidental and casual edits, and an
- * honest record of who did what among colleagues. It is NOT a security
- * boundary and the email is NOT verified: the app ships as a static bundle, so
- * the expected password is readable by anyone who opens browser devtools, a
- * determined user could call Supabase directly with the public anon key, and
- * nothing stops someone typing a colleague's address. The only real write
- * boundary — and the only route to verified identity — is
- * `supabase/migrations/0002_lock_down_rls.sql` plus Supabase Auth. Run those
- * before this deployment is reachable outside a trusted network.
- *
- * The challenge is held in a module-level store rather than React context so
- * that any layer — a screen, a hook, or the collection wrappers in App — can
- * raise it without the whole tree having to sit inside a provider.
+ * The operator's Name and Email are remembered locally per browser for convenience,
+ * but the Engineering Password must be entered on every change to prevent
+ * unauthorized or unintended modifications.
  */
 
-/** Override at build time with `VITE_EDIT_PASSWORD`; falls back to the plant default. */
+/** Override at build time with `VITE_EDIT_PASSWORD`; default is RADI2030. */
 export const EDIT_PASSWORD: string = import.meta.env.VITE_EDIT_PASSWORD || 'RADI2030';
 
+const ACTOR_NAME_KEY = 'radi-twin-actor-name';
 const ACTOR_EMAIL_KEY = 'radi-twin-actor-email';
 
 /** Thrown when a challenge is dismissed. Callers surface `message` to the operator. */
 export class EditAuthError extends Error {
-  constructor(message = 'Change not saved — engineering password required.') {
+  constructor(message = 'Change not saved — engineering authorisation required.') {
     super(message);
     this.name = 'EditAuthError';
   }
@@ -51,12 +35,13 @@ export const isEditAuthError = (err: unknown): err is EditAuthError =>
 
 export interface AuthorizationResult {
   authorised: boolean;
-  /** Empty when the challenge was cancelled. */
+  /** Name and Email of the authorising operator, or empty string when dismissed. */
   actorEmail: string;
+  actorName?: string;
 }
 
 interface Challenge {
-  /** Short description of the pending change, e.g. "Delete warehouse". */
+  /** Short description of the pending change, e.g. "Move Stacker Station". */
   action: string;
   /** Supporting context, e.g. the table and record being written. */
   detail?: string;
@@ -67,25 +52,43 @@ interface Challenge {
 // Remembered identity
 // ---------------------------------------------------------------------------
 
+export function getRememberedName(): string {
+  try {
+    return window.localStorage.getItem(ACTOR_NAME_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function setRememberedName(name: string): void {
+  try {
+    window.localStorage.setItem(ACTOR_NAME_KEY, name.trim());
+  } catch {
+    // Storage quota or private mode
+  }
+  notify();
+}
+
 export function getRememberedEmail(): string {
   try {
     return window.localStorage.getItem(ACTOR_EMAIL_KEY) ?? '';
   } catch {
-    return ''; // private mode / storage disabled — the operator just retypes it
+    return '';
   }
 }
 
 export function setRememberedEmail(email: string): void {
   try {
-    window.localStorage.setItem(ACTOR_EMAIL_KEY, email);
+    window.localStorage.setItem(ACTOR_EMAIL_KEY, email.trim());
   } catch {
-    // Not remembering is a smaller problem than failing the change.
+    // Storage quota or private mode
   }
   notify();
 }
 
-export function clearRememberedEmail(): void {
+export function clearRememberedIdentity(): void {
   try {
+    window.localStorage.removeItem(ACTOR_NAME_KEY);
     window.localStorage.removeItem(ACTOR_EMAIL_KEY);
   } catch {
     /* nothing to clear */
@@ -112,16 +115,12 @@ const subscribe = (fn: () => void) => {
 const getSnapshot = () => pendingChallenge;
 
 /**
- * Raises the challenge and resolves once it is answered or cancelled. Prefer
- * {@link guardEdit}, which turns a refusal into a thrown {@link EditAuthError}.
+ * Raises the challenge and resolves once it is answered or cancelled.
  */
 export function requestEditAuthorization(action: string, detail?: string): Promise<AuthorizationResult> {
   return new Promise<AuthorizationResult>(resolve => {
-    // One challenge at a time. A second write raised while the first is still
-    // on screen is refused rather than silently queued behind a dialog the
-    // operator believes belongs to it.
     if (pendingChallenge) {
-      resolve({ authorised: false, actorEmail: '' });
+      resolve({ authorised: false, actorEmail: '', actorName: '' });
       return;
     }
     pendingChallenge = { action, detail, resolve };
@@ -138,9 +137,7 @@ function settleChallenge(result: AuthorizationResult) {
 
 /**
  * Runs `mutate` only after the change is authorised, then hands the
- * authorising email to `onAudited` so the caller can record the trail entry.
- * Throws {@link EditAuthError} if the operator cancels — which the CRUD screens
- * already catch and display without losing the form being filled in.
+ * authorising identity to `onAudited` so the caller can record the trail entry.
  */
 export async function guardEdit<T>(
   action: string,
@@ -151,8 +148,6 @@ export async function guardEdit<T>(
   const { authorised, actorEmail } = await requestEditAuthorization(action, detail);
   if (!authorised) throw new EditAuthError();
   const result = await mutate();
-  // The trail is written after the change lands, so a failed write leaves no
-  // entry claiming something happened that did not.
   await onAudited?.(actorEmail, result);
   return result;
 }
@@ -164,21 +159,12 @@ interface WritableCollection<T extends { id: string }> {
 }
 
 export interface GuardedCollectionOptions<T extends { id: string }> {
-  /** Human name for one record, e.g. 'warehouse'. Used in the dialog. */
   label: string;
-  /** Table name, recorded in the trail. */
   entity: string;
-  /** Current rows — used to diff an update and to name a record being deleted. */
   rows: T[];
-  /** Names a record for a human reading the trail, e.g. `w => w.name`. */
   describe: (row: Partial<T>) => string;
 }
 
-/**
- * Wraps a collection's three write methods in the password challenge and the
- * change trail. Doing this once, where the collection is handed to a screen,
- * means there is exactly one place a persisted change can escape either.
- */
 export function guardCollection<T extends { id: string }, C extends WritableCollection<T>>(
   options: GuardedCollectionOptions<T>,
   api: C
@@ -230,27 +216,25 @@ export function guardCollection<T extends { id: string }, C extends WritableColl
 }
 
 // ---------------------------------------------------------------------------
-// UI
+// UI Component
 // ---------------------------------------------------------------------------
 
-/**
- * Renders the pending challenge, if any. Mount exactly once, at the root of the
- * app, above every other overlay.
- */
 export const EditAuthGate: React.FC<{ theme?: ThemeMode }> = ({ theme = 'light' }) => {
   const challenge = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const cancel = useCallback(() => settleChallenge({ authorised: false, actorEmail: '' }), []);
-  const succeed = useCallback((actorEmail: string) => {
+  const cancel = useCallback(() => settleChallenge({ authorised: false, actorEmail: '', actorName: '' }), []);
+  const succeed = useCallback((actorName: string, actorEmail: string) => {
+    setRememberedName(actorName);
     setRememberedEmail(actorEmail);
-    settleChallenge({ authorised: true, actorEmail });
+    const combinedActor = actorName.trim()
+      ? `${actorName.trim()} <${actorEmail.trim()}>`
+      : actorEmail.trim();
+    settleChallenge({ authorised: true, actorEmail: combinedActor, actorName });
   }, []);
 
   if (!challenge) return null;
 
   return (
     <PasswordChallenge
-      // Remounts (clearing any typed password and failure state) when a new
-      // change raises a challenge, rather than inheriting the last one's.
       key={challenge.action + (challenge.detail ?? '')}
       action={challenge.action}
       detail={challenge.detail}
@@ -266,34 +250,58 @@ const PasswordChallenge: React.FC<{
   detail?: string;
   theme: ThemeMode;
   onCancel: () => void;
-  onSuccess: (actorEmail: string) => void;
+  onSuccess: (name: string, email: string) => void;
 }> = ({ action, detail, theme, onCancel, onSuccess }) => {
   const isDark = theme === 'dark';
-  const remembered = getRememberedEmail();
-  const [email, setEmail] = useState(remembered);
-  const [isEditingEmail, setIsEditingEmail] = useState(remembered === '');
+  const rememberedName = getRememberedName();
+  const rememberedEmail = getRememberedEmail();
+
+  const [name, setName] = useState(rememberedName);
+  const [email, setEmail] = useState(rememberedEmail);
   const [password, setPassword] = useState('');
+  const [isEditingIdentity, setIsEditingIdentity] = useState(!rememberedName || !rememberedEmail);
+
+  const [nameError, setNameError] = useState<string | null>(null);
   const [emailError, setEmailError] = useState<string | null>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [failedAttempts, setFailedAttempts] = useState(0);
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    const trimmed = email.trim();
-    if (!isPlausibleEmail(trimmed)) {
-      setEmailError('Enter the work email this change should be recorded against.');
-      setIsEditingEmail(true);
+    let hasError = false;
+
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setNameError('Full name is required for audit trail tracking.');
+      hasError = true;
+    } else {
+      setNameError(null);
+    }
+
+    const trimmedEmail = email.trim();
+    if (!isPlausibleEmail(trimmedEmail)) {
+      setEmailError('Please enter a valid work or engineering email address.');
+      hasError = true;
+    } else {
+      setEmailError(null);
+    }
+
+    if (hasError) {
+      setIsEditingIdentity(true);
       return;
     }
-    setEmailError(null);
+
     if (password === EDIT_PASSWORD) {
-      onSuccess(trimmed);
+      setPasswordError(null);
+      onSuccess(trimmedName, trimmedEmail);
       return;
     }
+
     setPassword('');
+    setPasswordError('Incorrect password. Access denied.');
     setFailedAttempts(n => n + 1);
   };
 
-  // Escape abandons the change — the same way out every other dialog offers.
   React.useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === 'Escape') onCancel();
@@ -315,7 +323,7 @@ const PasswordChallenge: React.FC<{
   return (
     <div
       className={`fixed inset-0 z-[100] flex items-center justify-center p-4 ${
-        isDark ? 'bg-black/70' : 'bg-slate-900/40'
+        isDark ? 'bg-black/75' : 'bg-slate-900/50'
       } backdrop-blur-sm`}
       onMouseDown={e => {
         if (e.target === e.currentTarget) onCancel();
@@ -324,17 +332,17 @@ const PasswordChallenge: React.FC<{
       aria-modal="true"
       aria-label="Engineering authorisation required"
     >
-      <form onSubmit={submit} className={`w-full max-w-sm border rounded-xl shadow-2xl ${panel}`}>
+      <form onSubmit={submit} className={`w-full max-w-md border rounded-xl shadow-2xl ${panel}`}>
         <div className={`p-4 border-b flex items-start gap-3 ${divider}`}>
           <div className="mt-0.5 p-2 rounded-lg bg-amber-500/15 border border-amber-500/30">
             <Lock className="w-4 h-4 text-amber-500" />
           </div>
           <div className="flex-1 min-w-0">
             <h2 className={`text-sm font-bold uppercase tracking-wider ${isDark ? 'text-white' : 'text-slate-900'}`}>
-              Authorisation Required
+              Engineering Authorisation Required
             </h2>
             <p className={`text-xs mt-0.5 ${mutedCls}`}>
-              This change will be recorded in the change log.
+              Enter your credentials to apply and record this modification.
             </p>
           </div>
           <button
@@ -351,10 +359,10 @@ const PasswordChallenge: React.FC<{
           </button>
         </div>
 
-        <div className="p-4 space-y-3">
+        <div className="p-5 space-y-4">
           <div className={`rounded-lg border px-3 py-2 ${isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-[#F6F5F2] border-[#E7E3DC]'}`}>
             <p className={`text-[10px] font-semibold uppercase tracking-wider ${isDark ? 'text-gray-500' : 'text-slate-500'}`}>
-              Pending change
+              Target Modification
             </p>
             <p className={`text-xs font-bold mt-0.5 ${isDark ? 'text-white' : 'text-slate-900'}`}>{action}</p>
             {detail && (
@@ -362,86 +370,99 @@ const PasswordChallenge: React.FC<{
             )}
           </div>
 
-          {/* Identity. Typed once per browser, then shown as a confirmable line
-              so a shared terminal still makes it obvious who is about to be
-              recorded — and easy to correct when that is the wrong person. */}
-          {isEditingEmail ? (
-            <div>
-              <label htmlFor="edit-auth-email" className={`text-xs font-semibold mb-1 flex items-center gap-1.5 ${labelCls}`}>
-                <Mail className="w-3.5 h-3.5" />
-                Your work email
-              </label>
-              <input
-                id="edit-auth-email"
-                type="email"
-                autoFocus
-                autoComplete="email"
-                value={email}
-                onChange={e => {
-                  setEmail(e.target.value);
-                  setEmailError(null);
-                }}
-                placeholder="you@kiiramotors.com"
-                aria-invalid={emailError !== null}
-                className={`w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 ${
-                  emailError ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'
-                } ${inputCls}`}
-              />
-              {emailError ? (
-                <p className="text-[10px] mt-1 text-red-600 dark:text-red-400 font-semibold">{emailError}</p>
-              ) : (
-                <p className={`text-[10px] mt-1 ${mutedCls}`}>Remembered on this computer for future changes.</p>
-              )}
+          {/* User Identity Fields */}
+          {isEditingIdentity ? (
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="edit-auth-name" className={`text-xs font-semibold mb-1 flex items-center gap-1.5 ${labelCls}`}>
+                  <User className="w-3.5 h-3.5" />
+                  Full Name
+                </label>
+                <input
+                  id="edit-auth-name"
+                  type="text"
+                  autoFocus={!name}
+                  value={name}
+                  onChange={e => {
+                    setName(e.target.value);
+                    setNameError(null);
+                  }}
+                  placeholder="e.g. Eng. Sarah Namubiru"
+                  className={`w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 ${
+                    nameError ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'
+                  } ${inputCls}`}
+                />
+                {nameError && (
+                  <p className="text-[10px] mt-1 text-red-500 font-semibold">{nameError}</p>
+                )}
+              </div>
+
+              <div>
+                <label htmlFor="edit-auth-email" className={`text-xs font-semibold mb-1 flex items-center gap-1.5 ${labelCls}`}>
+                  <Mail className="w-3.5 h-3.5" />
+                  Work Email
+                </label>
+                <input
+                  id="edit-auth-email"
+                  type="email"
+                  value={email}
+                  onChange={e => {
+                    setEmail(e.target.value);
+                    setEmailError(null);
+                  }}
+                  placeholder="e.g. snamubiru@radienergy.ug"
+                  className={`w-full border rounded-lg px-3 py-2 text-xs focus:outline-none focus:ring-2 ${
+                    emailError ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'
+                  } ${inputCls}`}
+                />
+                {emailError && (
+                  <p className="text-[10px] mt-1 text-red-500 font-semibold">{emailError}</p>
+                )}
+              </div>
             </div>
           ) : (
-            <div
-              className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
-                isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-[#F6F5F2] border-[#E7E3DC]'
-              }`}
-            >
-              <Mail className={`w-3.5 h-3.5 shrink-0 ${mutedCls}`} />
-              <span className={`text-xs font-medium truncate flex-1 ${isDark ? 'text-gray-200' : 'text-slate-700'}`}>
-                {email}
-              </span>
+            <div className={`p-3 rounded-lg border flex items-center justify-between gap-2 ${
+              isDark ? 'bg-[#1A1D23] border-[#2D3139]' : 'bg-[#F6F5F2] border-[#E7E3DC]'
+            }`}>
+              <div className="min-w-0">
+                <p className={`text-xs font-bold truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>{name}</p>
+                <p className={`text-[11px] truncate ${mutedCls}`}>{email}</p>
+              </div>
               <button
                 type="button"
-                onClick={() => {
-                  setIsEditingEmail(true);
-                  setEmail('');
-                  clearRememberedEmail();
-                }}
-                className="text-[10px] font-bold text-blue-500 hover:text-blue-400 shrink-0"
+                onClick={() => setIsEditingIdentity(true)}
+                className="text-xs text-blue-500 hover:text-blue-400 font-semibold shrink-0"
               >
-                Not you?
+                Change
               </button>
             </div>
           )}
 
+          {/* Password Input (No hints whatsoever) */}
           <div>
             <label htmlFor="edit-auth-password" className={`text-xs font-semibold mb-1 flex items-center gap-1.5 ${labelCls}`}>
-              <KeyRound className="w-3.5 h-3.5" />
-              Engineering password
+              <Lock className="w-3.5 h-3.5" />
+              Engineering Password
             </label>
             <input
               id="edit-auth-password"
               type="password"
-              autoFocus={!isEditingEmail}
-              autoComplete="off"
+              autoFocus={!isEditingIdentity}
+              autoComplete="current-password"
               value={password}
-              onChange={e => setPassword(e.target.value)}
+              onChange={e => {
+                setPassword(e.target.value);
+                setPasswordError(null);
+              }}
               placeholder="••••••••"
-              aria-invalid={failedAttempts > 0}
               className={`w-full border rounded-lg px-3 py-2 text-xs font-mono tracking-widest focus:outline-none focus:ring-2 ${
-                failedAttempts > 0 && password.length === 0
-                  ? 'border-red-500 focus:ring-red-500'
-                  : 'focus:ring-blue-500'
+                passwordError ? 'border-red-500 focus:ring-red-500' : 'focus:ring-blue-500'
               } ${inputCls}`}
             />
-            {failedAttempts > 0 && (
-              <p className="text-[10px] mt-1 text-red-600 dark:text-red-400 font-semibold flex items-center gap-1">
+            {passwordError && (
+              <p className="text-[10px] mt-1.5 text-red-500 font-semibold flex items-center gap-1">
                 <ShieldAlert className="w-3 h-3 shrink-0" />
-                Incorrect password — change not applied
-                {failedAttempts > 1 ? ` (${failedAttempts} failed attempts).` : '.'}
+                {passwordError} {failedAttempts > 1 ? `(${failedAttempts} failed attempts)` : ''}
               </p>
             )}
           </div>
@@ -461,11 +482,11 @@ const PasswordChallenge: React.FC<{
           </button>
           <button
             type="submit"
-            disabled={password.length === 0 || email.trim().length === 0}
+            disabled={password.length === 0 || !name.trim() || !email.trim()}
             className="flex-1 py-2 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white flex items-center justify-center gap-1.5 disabled:opacity-50 transition-colors"
           >
             <Lock className="w-3.5 h-3.5" />
-            <span>Authorise</span>
+            <span>Verify & Authorise</span>
           </button>
         </div>
       </form>

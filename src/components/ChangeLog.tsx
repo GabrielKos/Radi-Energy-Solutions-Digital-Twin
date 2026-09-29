@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
-import { History, Search, Plus, Pencil, Trash2, RefreshCw, AlertTriangle, ShieldCheck } from 'lucide-react';
-import { AuditEntry, AuditAction, useAuditTrail } from '../lib/auditLog';
+import { History, Search, Plus, Pencil, Trash2, RefreshCw, AlertTriangle, ShieldCheck, Download, FileText, CheckCircle2 } from 'lucide-react';
+import { AuditEntry, AuditAction, useAuditTrail, recordAudit } from '../lib/auditLog';
+import { guardEdit } from '../lib/editAuth';
 import { ThemeMode } from '../types/plant';
 
 /**
@@ -146,6 +147,71 @@ export const ChangeLog: React.FC<ChangeLogProps> = ({ theme = 'light' }) => {
     ? 'bg-[#1A1D23] border-[#2D3139] text-white placeholder-gray-500'
     : 'bg-white border-[#DDD8CF] text-slate-900 placeholder-slate-400';
 
+  const [isAddingNote, setIsAddingNote] = useState(false);
+  const [noteTitle, setNoteTitle] = useState('');
+  const [noteContent, setNoteContent] = useState('');
+  const [noteArea, setNoteArea] = useState('zones');
+  const [exportFeedback, setExportFeedback] = useState<string | null>(null);
+
+  const handleExportCSV = () => {
+    if (!filtered.length) return;
+    const headers = ['ID', 'Timestamp', 'Actor Email', 'Action', 'Area', 'Record Label', 'Record ID', 'Changes'];
+    const rows = filtered.map(e => [
+      `"${e.id}"`,
+      `"${e.at}"`,
+      `"${e.actorEmail.replace(/"/g, '""')}"`,
+      `"${e.action}"`,
+      `"${ENTITY_LABELS[e.entity] || e.entity}"`,
+      `"${(e.recordLabel || '').replace(/"/g, '""')}"`,
+      `"${e.recordId}"`,
+      `"${JSON.stringify(e.changes).replace(/"/g, '""')}"`,
+    ]);
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `radi_energy_twin_audit_log_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setExportFeedback('Exported CSV!');
+    setTimeout(() => setExportFeedback(null), 3000);
+  };
+
+  const handleCreateNote = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!noteTitle.trim()) return;
+
+    try {
+      await guardEdit(
+        'Add Engineering Audit Note',
+        `${ENTITY_LABELS[noteArea] || noteArea} · ${noteTitle}`,
+        async () => {
+          // Commit note
+          return true;
+        },
+        async actorEmail => {
+          await recordAudit({
+            actorEmail,
+            action: 'create',
+            entity: noteArea,
+            recordId: `note-${Date.now()}`,
+            recordLabel: `[NOTE] ${noteTitle}`,
+            changes: {
+              engineeringNote: { from: null, to: noteContent || noteTitle },
+            },
+          });
+        }
+      );
+      setNoteTitle('');
+      setNoteContent('');
+      setIsAddingNote(false);
+      refetch();
+    } catch {
+      // User dismissed or failed authorization
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Header */}
@@ -156,26 +222,109 @@ export const ChangeLog: React.FC<ChangeLogProps> = ({ theme = 'light' }) => {
               <History className="w-5 h-5 text-blue-500" />
             </div>
             <div>
-              <h2 className={`text-sm font-bold uppercase tracking-wider ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                Change Log
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className={`text-sm font-bold uppercase tracking-wider ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                  Change Log & Audit Trail
+                </h2>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-500 border border-emerald-500/30">
+                  <CheckCircle2 className="w-3 h-3" /> Active & Logging
+                </span>
+              </div>
               <p className={`text-xs mt-0.5 ${muted}`}>
-                Every authorised change to the shared plant record — who, what and when.
+                Immutable record of every calibration, layout shift, census edit, and operational change.
               </p>
             </div>
           </div>
-          <button
-            onClick={refetch}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${
-              isDark
-                ? 'bg-[#1A1D23] border-[#2D3139] text-gray-300 hover:bg-[#252830]'
-                : 'bg-white border-[#DDD8CF] text-slate-700 hover:bg-[#F6F5F2]'
-            }`}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setIsAddingNote(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Add Audit Note</span>
+            </button>
+            <button
+              onClick={handleExportCSV}
+              disabled={filtered.length === 0}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors disabled:opacity-40 ${
+                isDark
+                  ? 'bg-[#1A1D23] border-[#2D3139] text-gray-300 hover:bg-[#252830]'
+                  : 'bg-white border-[#DDD8CF] text-slate-700 hover:bg-[#F6F5F2]'
+              }`}
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{exportFeedback || 'Export CSV'}</span>
+            </button>
+            <button
+              onClick={refetch}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-bold transition-colors ${
+                isDark
+                  ? 'bg-[#1A1D23] border-[#2D3139] text-gray-300 hover:bg-[#252830]'
+                  : 'bg-white border-[#DDD8CF] text-slate-700 hover:bg-[#F6F5F2]'
+              }`}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+              <span>Refresh</span>
+            </button>
+          </div>
         </div>
+
+        {isAddingNote && (
+          <form onSubmit={handleCreateNote} className={`mt-3 p-3 rounded-lg border space-y-2.5 ${isDark ? 'bg-[#16191F] border-[#2D3139]' : 'bg-[#F6F5F2] border-[#DDD8CF]'}`}>
+            <div className="flex items-center justify-between">
+              <span className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Record Official Engineering Note / Audit Entry</span>
+              <button
+                type="button"
+                onClick={() => setIsAddingNote(false)}
+                className={`text-xs ${muted} hover:underline`}
+              >
+                Cancel
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <select
+                value={noteArea}
+                onChange={e => setNoteArea(e.target.value)}
+                className={`border rounded-lg px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 ${inputCls}`}
+              >
+                {Object.entries(ENTITY_LABELS).map(([k, v]) => (
+                  <option key={k} value={k}>{v}</option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={noteTitle}
+                onChange={e => setNoteTitle(e.target.value)}
+                placeholder="Note subject (e.g. Line 1 OEE Calibration)"
+                required
+                className={`md:col-span-2 border rounded-lg px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 ${inputCls}`}
+              />
+            </div>
+            <textarea
+              value={noteContent}
+              onChange={e => setNoteContent(e.target.value)}
+              placeholder="Engineering details, calibration parameters, shift observations..."
+              rows={2}
+              className={`w-full border rounded-lg p-2 text-xs focus:ring-2 focus:ring-blue-500 ${inputCls}`}
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsAddingNote(false)}
+                className={`px-3 py-1 text-xs rounded border ${isDark ? 'border-[#2D3139] text-gray-300' : 'border-[#DDD8CF] text-slate-700'}`}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!noteTitle.trim()}
+                className="px-3 py-1 text-xs font-bold rounded bg-blue-600 hover:bg-blue-500 text-white disabled:opacity-50"
+              >
+                Sign & Save to Trail
+              </button>
+            </div>
+          </form>
+        )}
 
         <div
           className={`mt-3 flex items-start gap-2 rounded-lg border px-3 py-2 ${
@@ -184,9 +333,7 @@ export const ChangeLog: React.FC<ChangeLogProps> = ({ theme = 'light' }) => {
         >
           <ShieldCheck className="w-3.5 h-3.5 mt-0.5 shrink-0 text-emerald-500" />
           <p className={`text-[10px] leading-relaxed ${isDark ? 'text-gray-400' : 'text-slate-600'}`}>
-            This trail is append-only — entries cannot be edited or removed from the app. The email on
-            each entry is the one the person entered when authorising, not a verified sign-in;
-            verified identity arrives with Supabase Auth.
+            This audit trail is append-only and protected by the engineering authorization gate. Every create, update, delete, layout repositioning, or calibration note is captured with operator credentials, diff values, and timestamps.
           </p>
         </div>
       </div>

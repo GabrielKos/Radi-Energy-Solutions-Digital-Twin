@@ -126,20 +126,20 @@ export default function App() {
   const [simState, setSimState] = useState<SimulationState>({
     isRunning: true,
     simulationSpeed: 1, // 1x, 5x, 20x, 100x
-    shiftTimeSeconds: 7200, // Start 2 hours into 10h shift
-    shiftHoursRemaining: 8.0,
-    processedPacks: 271,
-    goodPacks: 263,
-    reworkedPacks: 6,
-    scrappedPacks: 2,
+    shiftTimeSeconds: 0, // Cold-start at 06:00:00
+    shiftHoursRemaining: 10.0,
+    processedPacks: 0,
+    goodPacks: 0,
+    reworkedPacks: 0,
+    scrappedPacks: 0,
     targetPacks: 1183,
     currentTaktSec: 26.57,
     currentYieldPct: 0.97,
     currentOeePct: 0.90,
-    inboundCellStockUnits: 285000,
+    inboundCellStockUnits: 350000,
     productionMaterialStockPct: 84,
-    outboundPackStockUnits: 3781, // 4-day buffer level in 10,000 capacity warehouse
-    bessCabinetStockUnits: 22,
+    outboundPackStockUnits: 3500, // 3-day buffer baseline in finished warehouse
+    bessCabinetStockUnits: 0,
     activeAgvs: 11,
     activeForklifts: 8,
     activeOperators: 124,
@@ -168,6 +168,12 @@ export default function App() {
     shiftCompleted: false,
     isShiftReportOpen: false,
     bessContainersBuilt: 1,
+
+    // Priming Mode & Gating Physics
+    isPrimed: true, // Default to continuous 26.7s cadence line; engineer can toggle or simulate cold-start priming
+    primingModeActive: false,
+    primingLeadTimeSec: 4200,
+    primingProgressPct: 100,
 
     // 4-Day Finished Pack Buffer Log
     day1PacksProduced: 1180,
@@ -264,8 +270,28 @@ export default function App() {
           };
         }
 
-        // Calculate pack production rate based on takt time
-        const packsProduced = Math.floor(nextTimeSec / Math.max(1, prev.currentTaktSec));
+        // Dynamic Priming vs Steady-State Flow
+        const leadTime = prev.primingLeadTimeSec || 4200;
+        let isNowPrimed = prev.isPrimed ?? true;
+        let primingProgress = 100;
+        let packsProduced = 0;
+
+        if (isNowPrimed) {
+          // Pre-primed / Steady-state line: runs immediately at takt cadence
+          packsProduced = Math.floor(nextTimeSec / Math.max(1, prev.currentTaktSec));
+          primingProgress = 100;
+        } else {
+          // Cold-Start Priming Pipeline
+          if (nextTimeSec < leadTime) {
+            packsProduced = 0;
+            primingProgress = Math.min(99, Math.round((nextTimeSec / Math.max(1, leadTime)) * 100));
+          } else {
+            isNowPrimed = true;
+            primingProgress = 100;
+            packsProduced = Math.floor((nextTimeSec - leadTime) / Math.max(1, prev.currentTaktSec));
+          }
+        }
+
         const goodPacks = Math.floor(packsProduced * prev.currentYieldPct);
         const scrappedPacks = Math.floor(packsProduced * (1 - prev.currentYieldPct) * 0.3);
         const reworkedPacks = packsProduced - goodPacks - scrappedPacks;
@@ -280,6 +306,8 @@ export default function App() {
           ...prev,
           shiftTimeSeconds: nextTimeSec,
           shiftHoursRemaining: parseFloat(((totalShiftSec - nextTimeSec) / 3600).toFixed(1)),
+          isPrimed: isNowPrimed,
+          primingProgressPct: primingProgress,
           processedPacks: packsProduced,
           goodPacks,
           reworkedPacks,
@@ -294,7 +322,7 @@ export default function App() {
     }, intervalMs);
 
     return () => clearInterval(timer);
-  }, [simState.isRunning, simState.simulationSpeed, simState.currentTaktSec, simState.currentYieldPct, simState.shiftLengthHours, simState.cellsPerPackBom, simState.packsPerBessContainer]);
+  }, [simState.isRunning, simState.simulationSpeed, simState.currentTaktSec, simState.currentYieldPct, simState.shiftLengthHours, simState.cellsPerPackBom, simState.packsPerBessContainer, simState.isPrimed, simState.primingLeadTimeSec]);
 
   // Handler to smoothly start next shift
   const handleStartNextShift = () => {

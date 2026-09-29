@@ -203,6 +203,17 @@ export const Header: React.FC<HeaderProps> = ({
 
             <div className={`h-3.5 w-[1px] ${isDark ? 'bg-white/10' : 'bg-slate-300'}`} />
 
+            {/* Steady-State / Line Cadence Status Pill */}
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[10px]">
+              <span className="relative flex h-2 w-2">
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-emerald-500 font-bold hidden sm:inline">Cadence:</span>
+              <span className="text-emerald-400 font-mono font-bold">1 pk / {simState.currentTaktSec || 26.57}s</span>
+            </div>
+
+            <div className={`h-3.5 w-[1px] ${isDark ? 'bg-white/10' : 'bg-slate-300'}`} />
+
             {/* Engine Buttons */}
             <div className="flex items-center gap-1">
               <button
@@ -302,9 +313,10 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               onClick={onOpenAiOptimizer}
               className="flex items-center gap-1.5 bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-xl shadow-[0_0_15px_rgba(37,99,235,0.35)] border border-blue-400/40 backdrop-blur-xl transition-all transform hover:scale-[1.02]"
+              title="Open AI Digital Twin Copilot, Bottleneck Explainer & Strategy Optimizer"
             >
               <Sparkles className="w-3.5 h-3.5 text-yellow-300 animate-pulse" />
-              <span>AI Strategy</span>
+              <span>AI Copilot & Optimizer</span>
             </button>
           </div>
         </div>

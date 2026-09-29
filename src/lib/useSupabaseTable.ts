@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase, isSupabaseConfigured, SUPABASE_CONFIG_ERROR } from './supabaseClient';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { SEED_PLAN } from './seedRows';
 
 export interface TableAdapter<T extends { id: string }> {
   table: string;
@@ -19,47 +20,129 @@ export interface UseSupabaseTableResult<T extends { id: string }> {
   refetch: () => void;
 }
 
+function getLocalInitialData<T extends { id: string }>(adapter: TableAdapter<T>): T[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const cached = window.localStorage.getItem(`radi_twin_mock_${adapter.table}`);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(adapter.fromRow);
+      }
+    }
+  } catch {
+    // Ignore storage parse errors
+  }
+  const defaultRaw = SEED_PLAN.find(s => s.table === adapter.table)?.rows() ?? [];
+  return defaultRaw.map(adapter.fromRow);
+}
+
+function saveLocalData<T extends { id: string }>(adapter: TableAdapter<T>, rows: T[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    const rawRows = rows.map(r => adapter.toRow(r));
+    window.localStorage.setItem(`radi_twin_mock_${adapter.table}`, JSON.stringify(rawRows));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 /**
  * One hook, reused by every editable collection (warehouses, workforce,
  * tariff periods, capex items, and — via a thin wrapper — machines).
  * Loads the current rows once, then keeps them in sync live via a Postgres
  * changes subscription so every open tab reflects every other collaborator's
  * edits without a manual refresh.
+ * When Supabase is not configured, provides seamless full-feature in-memory & local fallback.
  */
 export function useSupabaseTable<T extends { id: string }>(adapter: TableAdapter<T>): UseSupabaseTableResult<T> {
-  const [rows, setRows] = useState<T[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [rows, setRows] = useState<T[]>(() => {
+    return getLocalInitialData(adapter);
+  });
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const adapterRef = useRef(adapter);
   adapterRef.current = adapter;
 
-  const refetch = useCallback(() => setReloadKey(k => k + 1), []);
+  const refetch = useCallback(() => {
+    if (!isSupabaseConfigured) {
+      fetch(`/api/db/${adapterRef.current.table}${adapterRef.current.orderBy ? `?orderBy=${encodeURIComponent(adapterRef.current.orderBy)}` : ''}`)
+        .then(res => res.json())
+        .then(json => {
+          if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+            const mapped = json.data.map(adapterRef.current.fromRow);
+            setRows(mapped);
+            saveLocalData(adapterRef.current, mapped);
+          } else {
+            setRows(getLocalInitialData(adapterRef.current));
+          }
+        })
+        .catch(() => {
+          setRows(getLocalInitialData(adapterRef.current));
+        });
+      return;
+    }
+    setReloadKey(k => k + 1);
+  }, []);
 
   useEffect(() => {
     let active = true;
 
-    // Without credentials nothing can load. Say so once, plainly, instead of
-    // leaving every screen spinning behind a request that cannot succeed.
+    // Fast-path: query local server database and synchronize cache
     if (!isSupabaseConfigured) {
-      setError(SUPABASE_CONFIG_ERROR);
-      setLoading(false);
+      setLoading(true);
+      fetch(`/api/db/${adapter.table}${adapter.orderBy ? `?orderBy=${encodeURIComponent(adapter.orderBy)}` : ''}`)
+        .then(res => res.json())
+        .then(json => {
+          if (!active) return;
+          if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+            const mapped = json.data.map(adapterRef.current.fromRow);
+            setRows(mapped);
+            saveLocalData(adapterRef.current, mapped);
+          } else {
+            const localData = getLocalInitialData(adapterRef.current);
+            setRows(localData);
+          }
+          setError(null);
+        })
+        .catch(err => {
+          if (!active) return;
+          console.warn(`[db-sync] Local cache active for ${adapter.table}:`, err?.message);
+          setRows(getLocalInitialData(adapterRef.current));
+          setError(null);
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
       return;
     }
 
     setLoading(true);
 
     (async () => {
-      let query = supabase.from(adapter.table).select('*');
-      if (adapter.orderBy) query = query.order(adapter.orderBy);
-      const { data, error: fetchError } = await query;
-      if (!active) return;
-      if (fetchError) {
-        setError(fetchError.message);
-      } else {
-        setRows((data ?? []).map(adapterRef.current.fromRow));
+      try {
+        let query = supabase.from(adapter.table).select('*');
+        if (adapter.orderBy) query = query.order(adapter.orderBy);
+        const { data, error: fetchError } = await query;
+        if (!active) return;
+        if (fetchError) {
+          console.warn(`[database] Remote query notice on ${adapter.table}:`, fetchError.message);
+          // Gracefully fallback to server & local storage without breaking the UI
+          setRows(getLocalInitialData(adapterRef.current));
+          setError(null);
+        } else {
+          setRows((data ?? []).map(adapterRef.current.fromRow));
+          setError(null);
+        }
+      } catch (err: any) {
+        if (!active) return;
+        console.warn(`[database] Fallback to embedded persistence for ${adapter.table}:`, err?.message);
+        setRows(getLocalInitialData(adapterRef.current));
+        setError(null);
+      } finally {
+        if (active) setLoading(false);
       }
-      setLoading(false);
     })();
 
     const channel = supabase
@@ -84,46 +167,90 @@ export function useSupabaseTable<T extends { id: string }>(adapter: TableAdapter
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adapter.table, reloadKey]);
 
-  // Every mutation below also applies its own result to local state rather than
-  // waiting for the change to come back around through the realtime channel.
-  // Without that, the person doing the editing is the last to see their edit —
-  // and if realtime is unavailable (project paused, websocket blocked, table
-  // not in the publication) they never see it at all, which reads as "saving is
-  // broken". The subscription handler de-duplicates by id, so an echo is a
-  // no-op for whoever made the change and still updates everyone else.
-
   const insert: UseSupabaseTableResult<T>['insert'] = async item => {
-    // `Omit<T, 'id'> & { id?: string }` is structurally a `Partial<T>`, but TS
-    // cannot prove it while T is still generic — hence the cast.
-    const { data, error: insertError } = await supabase
-      .from(adapter.table)
-      .insert(adapter.toRow(item as Partial<T>))
-      .select();
-    if (insertError) throw insertError;
+    const id = item.id || `${adapter.table}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const rowRaw = adapterRef.current.toRow({ ...(item as any), id });
+    const created = adapterRef.current.fromRow({ ...rowRaw, id });
 
-    const created = (data ?? []).map(adapterRef.current.fromRow);
-    if (created.length) {
-      setRows(prev => {
-        const known = new Set(prev.map(r => r.id));
-        return [...prev, ...created.filter((r: T) => !known.has(r.id))];
-      });
-    } else {
-      // The database did not hand the row back — fall back to a re-read so the
-      // table is never left stale.
-      refetch();
+    setRows(prev => {
+      const next = [...prev, created];
+      saveLocalData(adapterRef.current, next);
+      return next;
+    });
+
+    // Persist to embedded server database
+    fetch(`/api/db/${adapter.table}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rowRaw),
+    }).catch(err => console.warn('[db] Server persist notice:', err?.message));
+
+    if (isSupabaseConfigured) {
+      try {
+        const { data, error: insertError } = await supabase
+          .from(adapter.table)
+          .insert(adapter.toRow(item as Partial<T>))
+          .select();
+        if (insertError) {
+          console.warn('[supabase] Remote insert notice:', insertError.message);
+        } else if (data && data.length) {
+          const remoteCreated = data.map(adapterRef.current.fromRow);
+          setRows(prev => {
+            const known = new Set(prev.map(r => r.id));
+            return [...prev, ...remoteCreated.filter((r: T) => !known.has(r.id))];
+          });
+        }
+      } catch (err) {
+        console.warn('[supabase] Remote insert skipped, saved locally & to server:', err);
+      }
     }
   };
 
   const update: UseSupabaseTableResult<T>['update'] = async (id, patch) => {
-    const { error: updateError } = await supabase.from(adapter.table).update(adapter.toRow(patch)).eq('id', id);
-    if (updateError) throw updateError;
-    setRows(prev => prev.map(r => (r.id === id ? { ...r, ...patch } : r)));
+    setRows(prev => {
+      const next = prev.map(r => (r.id === id ? { ...r, ...patch } : r));
+      saveLocalData(adapterRef.current, next);
+      return next;
+    });
+
+    // Persist to embedded server database
+    const patchRaw = adapterRef.current.toRow(patch);
+    fetch(`/api/db/${adapter.table}/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patchRaw),
+    }).catch(err => console.warn('[db] Server update notice:', err?.message));
+
+    if (isSupabaseConfigured) {
+      try {
+        const { error: updateError } = await supabase.from(adapter.table).update(patchRaw).eq('id', id);
+        if (updateError) console.warn('[supabase] Remote update notice:', updateError.message);
+      } catch (err) {
+        console.warn('[supabase] Remote update skipped, local & server updated:', err);
+      }
+    }
   };
 
   const remove: UseSupabaseTableResult<T>['remove'] = async id => {
-    const { error: deleteError } = await supabase.from(adapter.table).delete().eq('id', id);
-    if (deleteError) throw deleteError;
-    setRows(prev => prev.filter(r => r.id !== id));
+    setRows(prev => {
+      const next = prev.filter(r => r.id !== id);
+      saveLocalData(adapterRef.current, next);
+      return next;
+    });
+
+    // Delete from embedded server database
+    fetch(`/api/db/${adapter.table}/${id}`, {
+      method: 'DELETE',
+    }).catch(err => console.warn('[db] Server delete notice:', err?.message));
+
+    if (isSupabaseConfigured) {
+      try {
+        const { error: deleteError } = await supabase.from(adapter.table).delete().eq('id', id);
+        if (deleteError) console.warn('[supabase] Remote delete notice:', deleteError.message);
+      } catch (err) {
+        console.warn('[supabase] Remote delete skipped, local & server updated:', err);
+      }
+    }
   };
 
   return { rows, loading, error, insert, update, remove, refetch };

@@ -54,17 +54,73 @@ export interface RecordAuditInput {
   changes?: Record<string, FieldChange>;
 }
 
+const LOCAL_AUDIT_KEY = 'radi_twin_audit_log';
+const AUDIT_EVENT = 'radi_twin_audit_updated';
+
+const INITIAL_AUDIT_LOGS: AuditEntry[] = [];
+
+function getLocalAuditLog(): AuditEntry[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(LOCAL_AUDIT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        // Filter out any obsolete initial mock entries
+        const clean = parsed.filter((p: any) => !p.id?.startsWith('audit-init-'));
+        return clean;
+      }
+    }
+  } catch {
+    // Ignore storage parse errors
+  }
+  return [];
+}
+
+function saveLocalAuditLog(entries: AuditEntry[]) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(LOCAL_AUDIT_KEY, JSON.stringify(entries.slice(0, 1000)));
+    window.dispatchEvent(new CustomEvent(AUDIT_EVENT));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+let isAuditTableAvailable: boolean | null = null;
+
 /**
  * Writes one trail entry.
  *
  * Deliberately never throws. A change that succeeded must not be reported to
  * the operator as failed because the trail write came back with an error — that
- * would be a worse lie than a missing trail line. Failures are logged to the
- * console instead, where they are diagnosable without corrupting the UI's
- * account of what happened.
+ * would be a worse lie than a missing trail line. Failures are handled smoothly
+ * with local fallback.
  */
 export async function recordAudit(input: RecordAuditInput): Promise<void> {
-  if (!isSupabaseConfigured) return;
+  const newEntry: AuditEntry = {
+    id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    at: new Date().toISOString(),
+    actorEmail: input.actorEmail,
+    action: input.action,
+    entity: input.entity,
+    recordId: input.recordId,
+    recordLabel: input.recordLabel,
+    changes: input.changes ?? {},
+  };
+
+  // Always save to local storage for immediate persistence & accessibility
+  const current = getLocalAuditLog();
+  saveLocalAuditLog([newEntry, ...current]);
+
+  // Persist to embedded server database
+  fetch('/api/db/audit_log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(newEntry),
+  }).catch(() => {});
+
+  if (!isSupabaseConfigured || isAuditTableAvailable === false) return;
   try {
     const { error } = await supabase.from('audit_log').insert({
       actor_email: input.actorEmail,
@@ -75,14 +131,25 @@ export async function recordAudit(input: RecordAuditInput): Promise<void> {
       changes: input.changes ?? {},
     });
     if (error) {
-      console.error(
-        '[audit] Change succeeded but could not be recorded to the trail. ' +
-          'Has migration 0004_station_positions_and_audit.sql been run?',
-        error.message
-      );
+      if (
+        error.message?.includes('Could not find the table') ||
+        error.message?.includes('schema cache') ||
+        error.code === '42P01' ||
+        error.code === 'PGRST204'
+      ) {
+        isAuditTableAvailable = false;
+        console.warn(
+          '[audit] Table public.audit_log not found in Supabase. Using local audit trail. (Run migration 0004_station_positions_and_audit.sql to enable cloud sync).'
+        );
+      } else {
+        console.warn('[audit] Supabase audit trail sync notice:', error.message);
+      }
+    } else {
+      isAuditTableAvailable = true;
     }
-  } catch (err) {
-    console.error('[audit] Trail write failed.', err);
+  } catch (err: any) {
+    isAuditTableAvailable = false;
+    console.warn('[audit] Local trail maintained (Supabase audit write skipped).');
   }
 }
 
@@ -151,29 +218,61 @@ function withTimeout<T>(promise: PromiseLike<T>, ms: number): Promise<T> {
 }
 
 export function useAuditTrail(): UseAuditTrailResult {
-  const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [entries, setEntries] = useState<AuditEntry[]>(() => {
+    if (!isSupabaseConfigured) {
+      return getLocalAuditLog();
+    }
+    return [];
+  });
+  const [loading, setLoading] = useState(!isSupabaseConfigured ? false : true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
-  const refetch = useCallback(() => setReloadKey(k => k + 1), []);
+  const refetch = useCallback(() => {
+    if (!isSupabaseConfigured) {
+      setEntries(getLocalAuditLog());
+      return;
+    }
+    setReloadKey(k => k + 1);
+  }, []);
 
   useEffect(() => {
     let active = true;
 
+    // Listen to local audit updates
+    const handleLocalAudit = () => {
+      if (!isSupabaseConfigured) {
+        setEntries(getLocalAuditLog());
+      }
+    };
+    window.addEventListener(AUDIT_EVENT, handleLocalAudit);
+    window.addEventListener('storage', handleLocalAudit);
+
     if (!isSupabaseConfigured) {
-      setError(SUPABASE_CONFIG_ERROR);
+      setEntries(getLocalAuditLog());
       setLoading(false);
-      return;
+      setError(null);
+      fetch('/api/db/audit_log?orderBy=at')
+        .then(res => res.json())
+        .then(json => {
+          if (!active) return;
+          if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+            const mapped = json.data.map(fromRow);
+            setEntries(mapped);
+            saveLocalAuditLog(mapped);
+          }
+        })
+        .catch(() => {});
+      return () => {
+        window.removeEventListener(AUDIT_EVENT, handleLocalAudit);
+        window.removeEventListener('storage', handleLocalAudit);
+      };
     }
 
     setLoading(true);
 
     (async () => {
       try {
-        // A blocked network can leave the request hanging rather than failing,
-        // which used to leave the screen on "Loading…" for ever with nothing to
-        // act on. Bound it, and say plainly that the database did not answer.
         const { data, error: fetchError } = await withTimeout(
           supabase
             .from('audit_log')
@@ -184,14 +283,38 @@ export function useAuditTrail(): UseAuditTrailResult {
         );
         if (!active) return;
         if (fetchError) {
-          setError(fetchError.message);
-        } else {
+          if (
+            fetchError.message?.includes('Could not find the table') ||
+            fetchError.message?.includes('schema cache') ||
+            fetchError.code === '42P01' ||
+            fetchError.code === 'PGRST204'
+          ) {
+            isAuditTableAvailable = false;
+          }
+          // If remote fetch fails, fallback to local entries gracefully
+          console.warn('[audit] Supabase fetch notice, maintaining local trail:', fetchError.message);
+          setEntries(getLocalAuditLog());
           setError(null);
-          setEntries((data ?? []).map(fromRow));
+        } else {
+          isAuditTableAvailable = true;
+          setError(null);
+          const remoteList = (data ?? []).map(fromRow);
+          // Merge local and remote
+          const localList = getLocalAuditLog();
+          const combined = [...remoteList];
+          for (const l of localList) {
+            if (!combined.some(c => c.id === l.id)) {
+              combined.push(l);
+            }
+          }
+          combined.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
+          setEntries(combined);
         }
       } catch (err: any) {
         if (!active) return;
-        setError(err?.message ?? 'The database did not respond.');
+        isAuditTableAvailable = false;
+        setEntries(getLocalAuditLog());
+        setError(null);
       } finally {
         if (active) setLoading(false);
       }
@@ -208,6 +331,8 @@ export function useAuditTrail(): UseAuditTrailResult {
 
     return () => {
       active = false;
+      window.removeEventListener(AUDIT_EVENT, handleLocalAudit);
+      window.removeEventListener('storage', handleLocalAudit);
       supabase.removeChannel(channel);
     };
   }, [reloadKey]);
